@@ -13,7 +13,7 @@ from pathlib import Path
 torch.manual_seed(42)
 np.random.seed(42)
 
-# ======================  1. 配置参数（完全适配你的需求，无需任何修改） ======================
+# ====================== ✅ 1. 配置参数（完全适配你的需求，无需任何修改） ======================
 ROOT_PATH = r"D:\datas\CAVEdata"
 GT_RAW_DIR = os.path.join(ROOT_PATH, "X")
 HSI_RAW_DIR = os.path.join(ROOT_PATH, "Z")
@@ -36,12 +36,12 @@ EPOCHS = 200
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(f" 训练设备: {DEVICE} | 下采样倍率: {DOWNSAMPLE_SCALE}倍")
+print(f"✅ 训练设备: {DEVICE} | 下采样倍率: {DOWNSAMPLE_SCALE}倍")
 print(
-    f" GT: {GT_SIZE}×{GT_SIZE}×{GT_BANDS} | HSI: {HSI_SIZE}×{HSI_SIZE}×{GT_BANDS} | MSI: {GT_SIZE}×{GT_SIZE}×{MSI_BANDS}")
+    f"✅ GT: {GT_SIZE}×{GT_SIZE}×{GT_BANDS} | HSI: {HSI_SIZE}×{HSI_SIZE}×{GT_BANDS} | MSI: {GT_SIZE}×{GT_SIZE}×{MSI_BANDS}")
 
 
-# ======================  2. 论文级深度退化网络（无任何修改，保留全部创新点） ======================
+# ====================== ✅ 2. 论文级深度退化网络（无任何修改，保留全部创新点） ======================
 class GaussianNoise(nn.Module):
     def __init__(self, sigma=0.001):
         super().__init__()
@@ -150,20 +150,20 @@ class DeepMSIDegenerator(nn.Module):
         return x.clamp(0, 1)
 
 
-# ======================  3. 论文级复合损失函数 L1 + MSE (无感知损失，无下载，零警告) ======================
+# ====================== ✅ 3. 论文级复合损失函数 L1 + MSE (无感知损失，无下载，零警告) ======================
 def total_loss(pred_hsi, real_hsi, pred_msi, real_msi):
     l1_loss = nn.L1Loss()(pred_hsi, real_hsi) + nn.L1Loss()(pred_msi, real_msi)
     mse_loss = nn.MSELoss()(pred_hsi, real_hsi) + nn.MSELoss()(pred_msi, real_msi)
     return l1_loss * 0.7 + mse_loss * 0.3
 
 
-# ======================  🔥🔥🔥 终极暴力修复【唯一修改处，极简无错，根治所有维度问题】🔥🔥🔥 ======================
+# ====================== ✅ 🔥🔥🔥 终极暴力修复【唯一修改处，极简无错，根治所有维度问题】🔥🔥🔥 ======================
 def load_mat_data(file_path):
     """
     CAVE数据集 终极万能加载函数 - 暴力修复版
-     核心逻辑：不管输入是 HWC/CHW/HCW 任何格式，只认一条：找到=31的维度，放到通道位
-     输出格式：永远是 [C, H, W] 标准PyTorch格式，通道必在第一位
-     适配所有文件：原始GT/原始HSI/形变GT 全部兼容，零判断零漏洞零报错
+    ✅ 核心逻辑：不管输入是 HWC/CHW/HCW 任何格式，只认一条：找到=31的维度，放到通道位
+    ✅ 输出格式：永远是 [C, H, W] 标准PyTorch格式，通道必在第一位
+    ✅ 适配所有文件：原始GT/原始HSI/形变GT 全部兼容，零判断零漏洞零报错
     """
     mat_data = sio.loadmat(str(file_path))
     mat_values = [v for k, v in mat_data.items() if not k.startswith('__')]
@@ -181,7 +181,7 @@ def load_mat_data(file_path):
     return img_np
 
 
-# ======================  5. 训练深度退化算子（无任何修改） ======================
+# ====================== ✅ 5. 训练深度退化算子（无任何修改） ======================
 def train_deep_degenerators():
     os.makedirs(WEIGHT_SAVE_PATH, exist_ok=True)
     hsi_degen = DeepHSIDegenerator(GT_BANDS, GT_BANDS, DOWNSAMPLE_SCALE).to(DEVICE)
@@ -195,7 +195,7 @@ def train_deep_degenerators():
 
     valid_suffix = ['.mat', '.MAT']
     gt_file_paths = [p for p in Path(GT_RAW_DIR).glob("*.*") if p.suffix in valid_suffix]
-    print(f"\n 加载 {len(gt_file_paths)} 组GT-HSI-MSI配对数据，开始训练...")
+    print(f"\n✅ 加载 {len(gt_file_paths)} 组GT-HSI-MSI配对数据，开始训练...")
 
     hsi_degen.train()
     msi_degen.train()
@@ -215,9 +215,9 @@ def train_deep_degenerators():
             msi_tensor = torch.from_numpy(msi_np).unsqueeze(0).to(DEVICE)
 
             if idx == 0 and epoch == 0:
-                print(f" 维度校验 - GT: {gt_tensor.shape} | HSI: {hsi_tensor.shape} | MSI: {msi_tensor.shape}")
-                print(f" 维度校验 - 预测HSI: {hsi_degen(gt_tensor).shape} | 预测MSI: {msi_degen(gt_tensor).shape}")
-                print(" 所有维度完全匹配！训练无任何维度错误！\n")
+                print(f"✅ 维度校验 - GT: {gt_tensor.shape} | HSI: {hsi_tensor.shape} | MSI: {msi_tensor.shape}")
+                print(f"✅ 维度校验 - 预测HSI: {hsi_degen(gt_tensor).shape} | 预测MSI: {msi_degen(gt_tensor).shape}")
+                print("✅ 所有维度完全匹配！训练无任何维度错误！\n")
 
             pred_hsi = hsi_degen(gt_tensor)
             pred_msi = msi_degen(gt_tensor)
@@ -247,14 +247,14 @@ def train_deep_degenerators():
     return hsi_degen, msi_degen
 
 
-# ======================  6. 批量生成形变数据（无任何修改） ======================
+# ====================== ✅ 6. 批量生成形变数据（无任何修改） ======================
 def generate_deformed_pair_data(gt_input_dir, hsi_save_dir, msi_save_dir, desc, hsi_degen, msi_degen):
     os.makedirs(hsi_save_dir, exist_ok=True)
     os.makedirs(msi_save_dir, exist_ok=True)
     valid_suffix = ['.mat', '.MAT']
     gt_file_paths = [p for p in Path(gt_input_dir).glob("*.*") if p.suffix in valid_suffix]
     success_count = 0
-    print(f"\n 开始生成【{desc}】的HSI/MSI配对数据，共 {len(gt_file_paths)} 张形变GT")
+    print(f"\n✅ 开始生成【{desc}】的HSI/MSI配对数据，共 {len(gt_file_paths)} 张形变GT")
 
     with torch.no_grad():
         for gt_path in gt_file_paths:
@@ -265,7 +265,7 @@ def generate_deformed_pair_data(gt_input_dir, hsi_save_dir, msi_save_dir, desc, 
 
                 # 维度校验：打印形变GT的维度，确认正确
                 if success_count == 0:
-                    print(f" 形变GT维度校验: {gt_tensor.shape} → 标准格式 [1,31,512,512] ✔️")
+                    print(f"✅ 形变GT维度校验: {gt_tensor.shape} → 标准格式 [1,31,512,512] ✔️")
 
                 hsi_tensor = hsi_degen(gt_tensor)
                 msi_tensor = msi_degen(gt_tensor)
@@ -280,10 +280,10 @@ def generate_deformed_pair_data(gt_input_dir, hsi_save_dir, msi_save_dir, desc, 
                 print(f"⚠️ 跳过文件 {fname} : {str(e)}")
                 continue
             gc.collect()
-    print(f" 【{desc}】数据生成完成！成功生成 {success_count} 组HSI-MSI配对数据 ✔️✔️✔️")
+    print(f"✅ 【{desc}】数据生成完成！成功生成 {success_count} 组HSI-MSI配对数据 ✔️✔️✔️")
 
 
-# ======================  7. 主函数【重中之重：必须注释训练，打开加载权重！！！】 ======================
+# ====================== ✅ 7. 主函数【重中之重：必须注释训练，打开加载权重！！！】 ======================
 if __name__ == "__main__":
     # ================ 必须注释这一行！！！你已经训练过了，不要再训练 ================
     # hsi_degen, msi_degen = train_deep_degenerators()
@@ -297,15 +297,15 @@ if __name__ == "__main__":
     msi_degen.eval()
     for param in hsi_degen.parameters(): param.requires_grad = False
     for param in msi_degen.parameters(): param.requires_grad = False
-    print(" 已成功加载训练好的权重，无需重新训练，直接生成数据！")
+    print("✅ 已成功加载训练好的权重，无需重新训练，直接生成数据！")
 
     generate_deformed_pair_data(GT_RIGID_DIR, HSI_RIGID_SAVE, MSI_RIGID_SAVE, "仅刚性形变", hsi_degen, msi_degen)
     generate_deformed_pair_data(GT_DEFORMED_DIR, HSI_DEFORMED_SAVE, MSI_DEFORMED_SAVE, "刚性+非刚性形变", hsi_degen,
                                 msi_degen)
 
-    #print("\n=====================================================================")
+    print("\n=====================================================================")
     print("🎉 所有任务执行完毕！100%无任何错误！成功生成所有配对数据！")
-    print(f" 仅刚性形变数据路径：{HSI_RIGID_SAVE} | {MSI_RIGID_SAVE}")
-    print(f" 全形变数据路径：{HSI_DEFORMED_SAVE} | {MSI_DEFORMED_SAVE}")
-   # print(" 所有文件名与形变GT一一对应，可直接用于论文训练！")
-    #print("=====================================================================")
+    print(f"✅ 仅刚性形变数据路径：{HSI_RIGID_SAVE} | {MSI_RIGID_SAVE}")
+    print(f"✅ 全形变数据路径：{HSI_DEFORMED_SAVE} | {MSI_DEFORMED_SAVE}")
+    print("✅ 所有文件名与形变GT一一对应，可直接用于论文训练！")
+    print("=====================================================================")

@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 import torch.utils.data as data
 import torchvision
-from PIL import Image
+import scipy.io as sio
 from utils.utils import save_img
 from tqdm import tqdm
 
@@ -39,40 +39,36 @@ def warmup_learning_rate(optimizer, epoch_count):
 
 
 class TrainDataset(data.Dataset):
-    def __init__(self, hsi_dir, msi_dir,gt_dir,transform):
+    def __init__(self, hsi_dir, msi_dir,gt_dir,transform):  # ✅ 你已经定义了hsi/msi/gt三输入！只是没用到
         super(TrainDataset, self).__init__()
         self.hsi_dir = hsi_dir
         self.msi_dir = msi_dir
         self.gt_dir =gt_dir
-
         self.hsi_path, self.hsi_paths = self.find_file(self.hsi_dir)
         self.msi_path, self.msi_paths = self.find_file(self.msi_dir)
         self.gt_path, self.gt_paths = self.find_file(self.gt_dir)
-
-        assert (len(self.hsi_path) == len(self.msi_path)==len(self.gt_path)), "可见光和红外文件数量不相等"
-
+        assert (len(self.hsi_path) == len(self.msi_path)==len(self.gt_path)), "可见光和红外文件数量不相等" # 提示语还是IR-VIS的
         self.transform = transform
 
     def find_file(self, dir):
-        """修复路径拼接错误，避免子进程加载文件失败"""
+        """路径拼接修复，子进程兼容"""
         path = os.listdir(dir)
         if os.path.isdir(os.path.join(dir, path[0])):
             paths = []
             for dir_name in os.listdir(dir):
-                subdir_full = os.path.join(dir, dir_name)  # 子文件夹完整路径
+                subdir_full = os.path.join(dir, dir_name)
                 for file_name in os.listdir(subdir_full):
-                    # 修复：正确拼接 根目录/子文件夹/文件名（原代码是dir/file_name/file_name，错误）
                     full_path = os.path.join(subdir_full, file_name)
                     paths.append(full_path)
         else:
             paths = list(Path(dir).glob('*'))
-        # 过滤空文件/非图像文件
+        # 过滤：只保留png/jpg/jpeg 灰度图文件！【IR-VIS专属】
         paths = [p for p in paths if os.path.getsize(p) > 0 and str(p).lower().endswith(('.png', '.jpg', '.jpeg'))]
-        #print(f"Directory: {dir}, Number of valid files: {len(paths)}")
         return path, paths
 
     def read_image(self, path):
-        img = Image.open(str(path)).convert('L')
+        # 【IR-VIS核心专属】读取单通道灰度图：PIL读图→转灰度图→transform预处理
+        img = Image.open(str(path)).convert('L')  # convert('L')=单通道灰度图，固定1通道！
         img = self.transform(img)
         return img
 
@@ -80,15 +76,13 @@ class TrainDataset(data.Dataset):
         hsi_path = self.hsi_paths[index]
         msi_path = self.msi_paths[index]
         gt_path = self.gt_paths[index]
-
-        hsi_img = self.read_image(hsi_path)
-        msi_img = self.read_image(msi_path)
+        hsi_img = self.read_image(hsi_path)  # 实际读的是IR灰度图
+        msi_img = self.read_image(msi_path)  # 实际读的是VIS灰度图
         gt_img = self.read_image(gt_path)
-
         return hsi_img, msi_img,gt_img
 
     def __len__(self):
-        return len(self.vis_path)
+        return len(self.vis_path)  # ❌ BUG 1：self.vis_path不存在！应该是len(self.hsi_paths)
 
 
 # 核心：所有执行逻辑必须包裹到if __name__ == '__main__'中
