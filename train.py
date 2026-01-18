@@ -183,7 +183,7 @@ if __name__ == '__main__':
         decoder = model.Decoder()
         MN_hsi = model.Enhance()  # 原MN_vis -> MN_hsi
         MN_msi = model.Enhance()  # 原MN_ir -> MN_msi
-        HSIDP = model.DictionaryRepresentationModule()  # 原VISDP -> HSIDP
+        HSIDP = model.DictionaryRepresentationModule()  # 原VISDP -> HSIDP11
         MSIDP = model.DictionaryRepresentationModule()  # 原IRDP -> MSIDP
         ImageDeformation = model.ImageTransform()
         MHCSA_hsi = model.MHCSAB()  # 原MHCSA_vis -> MHCSA_hsi
