@@ -10,6 +10,7 @@ import torch.utils.data as data
 import torchvision
 import scipy.io as sio
 from PIL import Image
+from torch.cuda.amp import autocast, GradScaler
 
 from utils.utils import save_img
 from tqdm import tqdm
@@ -134,6 +135,7 @@ if __name__ == '__main__':
     # ========== 初始化环境 ==========
     os.environ['CUDA_LAUNCH_BLOCKING'] = device_id
     device = torch.device("cuda:" + device_id if torch.cuda.is_available() else "cpu")
+    print(f"🚀 使用设备: {device}")
 
     try:
         torch.multiprocessing.set_start_method('spawn', force=True)
@@ -150,9 +152,7 @@ if __name__ == '__main__':
     utils.check_dir(save_img_dir)
 
     # ========== 数据加载器初始化 ==========
-    # ⚠️ 注意：由于HSI和MSI分辨率不同，transform需要分别处理
-    # 这里先使用None，在read_mat_image中可以根据需要添加resize
-    tf = None  # 暂时不使用torchvision的transform，因为多通道数据需要特殊处理
+    tf = None
 
     dataset = TrainDataset(args.args.hsi_train_dir, args.args.msi_train_dir, args.args.gt_train_dir, tf)
 
@@ -167,31 +167,34 @@ if __name__ == '__main__':
     )
 
     iter_num = int(dataset.__len__() / args.args.batch_size)
-    save_image_iter = int(iter_num / args.args.save_image_num)
+    save_image_iter = max(1, int(iter_num / args.args.save_image_num))
 
     # ========== 模型初始化 ==========
+    print("🔧 正在初始化模型...")
     Lgrad = Loss.L_Grad().to(device)
     CC = Loss.CorrelationCoefficient().to(device)
     Lcorrespondence = Loss.L_correspondence()
 
+    # ✅ 关键修复1: 创建两个不同的base模块
     with torch.no_grad():
         base_msi = model.base(in_channels=3)  # MSI: 3通道 -> 64通道
         base_hsi = model.base(in_channels=31)  # HSI: 31通道 -> 64通道
-        hsi_MFE = model.FeatureExtractor()  # 原vis_MFE -> hsi_MFE
-        msi_MFE = model.FeatureExtractor()  # 原ir_MFE -> msi_MFE
+        hsi_MFE = model.FeatureExtractor()
+        msi_MFE = model.FeatureExtractor()
         fusion_decoder = model.Decoder()
         PAFE = model.FeatureExtractor()
         decoder = model.Decoder()
-        MN_hsi = model.Enhance()  # 原MN_vis -> MN_hsi
-        MN_msi = model.Enhance()  # 原MN_ir -> MN_msi
-        HSIDP = model.DictionaryRepresentationModule()  # 原VISDP -> HSIDP11
-        MSIDP = model.DictionaryRepresentationModule()  # 原IRDP -> MSIDP
+        MN_hsi = model.Enhance()
+        MN_msi = model.Enhance()
+        HSIDP = model.DictionaryRepresentationModule()
+        MSIDP = model.DictionaryRepresentationModule()
         ImageDeformation = model.ImageTransform()
-        MHCSA_hsi = model.MHCSAB()  # 原MHCSA_vis -> MHCSA_hsi
-        MHCSA_msi = model.MHCSAB()  # 原MHCSA_ir -> MHCSA_msi
+        MHCSA_hsi = model.MHCSAB()
+        MHCSA_msi = model.MHCSAB()
         fusion_module = model.FusionMoudle()
 
     # 模型训练模式+设备迁移
+    print("📦 正在加载模型到GPU...")
     base_msi.train().to(device)
     base_hsi.train().to(device)
     hsi_MFE.train().to(device)
@@ -208,21 +211,28 @@ if __name__ == '__main__':
     fusion_module.train().to(device)
 
     # ========== 优化器初始化 ==========
-    optimizer_FE = torch.optim.Adam([{'params': base_msi.parameters()},
-                                     {'params': base_hsi.parameters()},
-                                     {'params': hsi_MFE.parameters()},
-                                     {'params': msi_MFE.parameters()},
-                                     {'params': fusion_decoder.parameters()},
-                                     {'params': PAFE.parameters()},
-                                     {'params': decoder.parameters()},
-                                     {'params': MN_hsi.parameters()},
-                                     {'params': MN_msi.parameters()}],
-                                    lr=0.0002)
+    print("⚙️ 正在配置优化器...")
+    optimizer_FE = torch.optim.Adam([
+        {'params': base_msi.parameters()},  # ✅ 修复2: 包含两个base
+        {'params': base_hsi.parameters()},
+        {'params': hsi_MFE.parameters()},
+        {'params': msi_MFE.parameters()},
+        {'params': fusion_decoder.parameters()},
+        {'params': PAFE.parameters()},
+        {'params': decoder.parameters()},
+        {'params': MN_hsi.parameters()},
+        {'params': MN_msi.parameters()}
+    ], lr=0.0002)
+
     optimizer_HSIDP = torch.optim.Adam(HSIDP.parameters(), lr=0.0008)
     optimizer_MSIDP = torch.optim.Adam(MSIDP.parameters(), lr=0.0008)
     optimizer_MHCSAhsi = torch.optim.Adam(MHCSA_hsi.parameters(), lr=args.args.LR)
     optimizer_MHCSAmsi = torch.optim.Adam(MHCSA_msi.parameters(), lr=args.args.LR)
     optimizer_FusionModule = torch.optim.Adam(fusion_module.parameters(), lr=0.0002)
+
+    # ✅ 优化3: 混合精度训练
+    scaler = GradScaler()
+    print("✅ 已启用混合精度训练（AMP），显存占用将减少约50%")
 
 
     # ========== 训练函数定义 ==========
@@ -234,107 +244,147 @@ if __name__ == '__main__':
         epoch_loss_correspondence_predict = []
 
         for step, x in enumerate(data_iter):
-            hsi = x[0].to(device, non_blocking=True)  # (B, 31, 16, 16) - 原始低分辨率HSI
-            msi = x[1].to(device, non_blocking=True)  # (B, 3, 512, 512) - 原始高分辨率MSI
-            gt = x[2].to(device, non_blocking=True)  # (B, 31, 512, 512)
+            # 数据加载
+            hsi = x[0].to(device, non_blocking=True)
+            msi = x[1].to(device, non_blocking=True)
+            gt = x[2].to(device, non_blocking=True)
 
-            # ========== ✅ 关键修复：先将HSI上采样到512×512 ==========
+            # ========== ✅ 关键修复：ImageDeformation在autocast外执行 ==========
+            # 先上采样HSI（在autocast外，使用FP32）
             hsi_upsampled = F.interpolate(
                 hsi,
-                size=(msi.size(2), msi.size(3)),  # 上采样到512×512
+                size=(msi.size(2), msi.size(3)),
                 mode='bilinear',
                 align_corners=False
-            )  # 现在 hsi_upsampled: (B, 31, 512, 512)
+            )
 
-            # ⚠️ ImageDeformation处理的是上采样后的HSI
+            # ✅ ImageDeformation不使用混合精度（避免torch.inverse错误）
             with torch.no_grad():
                 hsi_d, msi_d, _, index_r, _ = ImageDeformation(hsi_upsampled, msi)
 
-            # ========== ✅ 现在所有输入都是512×512，尺寸匹配 ==========
-            # 特征提取 - 使用对应的base模块
-            hsi_1 = base_hsi(hsi_upsampled)  # (B, 31, 512, 512) -> (B, 64, 512, 512)
-            hsi_d_1 = base_hsi(hsi_d)  # (B, 31, 512, 512) -> (B, 64, 512, 512)
-            msi_1 = base_msi(msi)  # (B, 3, 512, 512) -> (B, 64, 512, 512)
-            msi_d_1 = base_msi(msi_d)  # (B, 3, 512, 512) -> (B, 64, 512, 512)
+            # ========== 其他部分使用混合精度 ==========
+            with autocast():
+                # ========== 阶段2: 基础特征提取 ==========
+                hsi_1 = base_hsi(hsi_upsampled)
+                hsi_d_1 = base_hsi(hsi_d)
+                msi_1 = base_msi(msi)
+                msi_d_1 = base_msi(msi_d)
 
-            # 现在尺寸都是 (B, 64, 512, 512)，可以正常运算
-            hsi_fe = hsi_MFE(hsi_1)
-            msi_fe = msi_MFE(msi_1)
-            simple_fusion_f_1 = hsi_fe + msi_fe  # ✅ 512×512 + 512×512 正常！
-            fusion_image_1, fusion_f_1 = fusion_decoder(simple_fusion_f_1)
+                # ✅ 释放不再需要的张量
+                del hsi_upsampled
+                torch.cuda.empty_cache()
 
-            hsi_d_fe = hsi_MFE(hsi_d_1)
-            msi_d_fe = msi_MFE(msi_d_1)
-            simple_fusion_d_f_1 = hsi_d_fe + msi_d_fe
-            fusion_d_image_1, fusion_d_f_1 = fusion_decoder(simple_fusion_d_f_1)
+                # ========== 阶段3: 深层特征提取（第一路径） ==========
+                hsi_fe = hsi_MFE(hsi_1)
+                msi_fe = msi_MFE(msi_1)
+                simple_fusion_f_1 = hsi_fe + msi_fe
+                fusion_image_1, fusion_f_1 = fusion_decoder(simple_fusion_f_1)
 
-            hsi_f = PAFE(hsi_1)
-            msi_f = PAFE(msi_1)
-            simple_fusion_f = hsi_f + msi_f
-            fusion_image, fusion_f = decoder(simple_fusion_f)
+                del simple_fusion_f_1
+                torch.cuda.empty_cache()
 
-            hsi_d_f = PAFE(hsi_d_1)
-            msi_d_f = PAFE(msi_d_1)
-            simple_fusion_d_f = hsi_d_f + msi_d_f
-            fusion_d_image, fusion_d_f = decoder(simple_fusion_d_f)
+                hsi_d_fe = hsi_MFE(hsi_d_1)
+                msi_d_fe = msi_MFE(msi_d_1)
+                simple_fusion_d_f_1 = hsi_d_fe + msi_d_fe
+                fusion_d_image_1, fusion_d_f_1 = fusion_decoder(simple_fusion_d_f_1)
 
-            hsi_e_f = MN_hsi(hsi_f)
-            msi_e_f = MN_msi(msi_f)
-            hsi_d_e_f = MN_hsi(hsi_d_f)
-            msi_d_e_f = MN_msi(msi_d_f)
+                del simple_fusion_d_f_1
+                torch.cuda.empty_cache()
 
-            HSIDP_hsi_f, _ = HSIDP(hsi_e_f)
-            MSIDP_msi_f, _ = MSIDP(msi_e_f)
-            HSIDP_hsi_d_f, _ = HSIDP(hsi_d_e_f)
-            MSIDP_msi_d_f, _ = MSIDP(msi_d_e_f)
+                # ========== 阶段4: PAFE特征提取 ==========
+                hsi_f = PAFE(hsi_1)
+                msi_f = PAFE(msi_1)
+                simple_fusion_f = hsi_f + msi_f
+                fusion_image, fusion_f = decoder(simple_fusion_f)
 
-            fixed_DP = HSIDP_hsi_f
-            moving_DP = MSIDP_msi_d_f
+                del simple_fusion_f, hsi_1
+                torch.cuda.empty_cache()
 
-            moving_DP_lw = model.df_window_partition(moving_DP, args.args.large_w_size, args.args.small_w_size)
-            fixed_DP_sw = model.window_partition(fixed_DP, args.args.small_w_size, args.args.small_w_size)
+                hsi_d_f = PAFE(hsi_d_1)
+                msi_d_f = PAFE(msi_d_1)
+                simple_fusion_d_f = hsi_d_f + msi_d_f
+                fusion_d_image, fusion_d_f = decoder(simple_fusion_d_f)
 
-            correspondence_matrixs = model.CMAP(fixed_DP_sw, moving_DP_lw, MHCSA_hsi, MHCSA_msi, True)
+                del simple_fusion_d_f, hsi_d_1, msi_1, msi_d_1
+                torch.cuda.empty_cache()
 
-            msi_d_f_sample = model.feature_reorganization(correspondence_matrixs, msi_d_fe)
-            fusion_image_sample = fusion_module(hsi_fe, msi_d_f_sample)
+                # ========== 阶段5: 模态归一化和字典补偿 ==========
+                hsi_e_f = MN_hsi(hsi_f)
+                msi_e_f = MN_msi(msi_f)
+                hsi_d_e_f = MN_hsi(hsi_d_f)
+                msi_d_e_f = MN_msi(msi_d_f)
 
-            # ========== 计算损失（使用原始低分辨率HSI） ==========
-            loss_fusion = Lgrad(gt, gt, fusion_image) + Loss.Loss_intensity(gt, gt, fusion_image) + \
-                          Lgrad(gt, gt, fusion_d_image) + Loss.Loss_intensity(gt, gt, fusion_d_image)
+                HSIDP_hsi_f, _ = HSIDP(hsi_e_f)
+                MSIDP_msi_f, _ = MSIDP(msi_e_f)
+                HSIDP_hsi_d_f, _ = HSIDP(hsi_d_e_f)
+                MSIDP_msi_d_f, _ = MSIDP(msi_d_e_f)
 
-            loss_fusion_1 = Lgrad(gt, gt, fusion_image_1) + Loss.Loss_intensity(gt, gt, fusion_image_1) + \
-                            Lgrad(gt, gt, fusion_d_image_1) + Loss.Loss_intensity(gt, gt, fusion_d_image_1)
+                del hsi_e_f, msi_e_f, hsi_d_e_f, msi_d_e_f
+                torch.cuda.empty_cache()
 
-            loss_0 = loss_fusion
+                # ========== 阶段6: 跨模态对齐感知 ==========
+                fixed_DP = HSIDP_hsi_f
+                moving_DP = MSIDP_msi_d_f
 
-            loss_HSIDP = - CC(HSIDP_hsi_f, fusion_f.detach()) - CC(HSIDP_hsi_d_f, fusion_d_f.detach())
-            loss_MSIDP = - CC(MSIDP_msi_f, fusion_f.detach()) - CC(MSIDP_msi_d_f, fusion_d_f.detach())
-            loss_same = F.mse_loss(HSIDP_hsi_f, MSIDP_msi_f) + F.mse_loss(HSIDP_hsi_d_f, MSIDP_msi_d_f)
+                moving_DP_lw = model.df_window_partition(moving_DP, args.args.large_w_size, args.args.small_w_size)
+                fixed_DP_sw = model.window_partition(fixed_DP, args.args.small_w_size, args.args.small_w_size)
 
-            loss_1 = 2 * (loss_HSIDP + loss_MSIDP + loss_same)
-            loss_2 = Lgrad(gt, gt, fusion_image_sample) + Loss.Loss_intensity(gt, gt, fusion_image_sample)
+                correspondence_matrixs = model.CMAP(fixed_DP_sw, moving_DP_lw, MHCSA_hsi, MHCSA_msi, True)
 
-            loss_correspondence_matrix, loss_correspondence_matrix_1 = Lcorrespondence(
-                correspondence_matrixs, index_r)
-            loss_3 = 4 * (loss_correspondence_matrix + loss_correspondence_matrix_1)
+                del fixed_DP_sw, moving_DP_lw
+                torch.cuda.empty_cache()
 
-            loss = loss_0 + loss_1 + loss_2 + loss_3 + loss_fusion_1
+                # ========== 阶段7: 特征重组和最终融合 ==========
+                msi_d_f_sample = model.feature_reorganization(correspondence_matrixs, msi_d_fe)
+                fusion_image_sample = fusion_module(hsi_fe, msi_d_f_sample)
 
-            # 反向传播
+                # ========== 阶段8: 损失计算 ==========
+                loss_fusion = Lgrad(gt, gt, fusion_image) + Loss.Loss_intensity(gt, gt, fusion_image) + \
+                              Lgrad(gt, gt, fusion_d_image) + Loss.Loss_intensity(gt, gt, fusion_d_image)
+
+                loss_fusion_1 = Lgrad(gt, gt, fusion_image_1) + Loss.Loss_intensity(gt, gt, fusion_image_1) + \
+                                Lgrad(gt, gt, fusion_d_image_1) + Loss.Loss_intensity(gt, gt, fusion_d_image_1)
+
+                loss_0 = loss_fusion
+
+                loss_HSIDP = - CC(HSIDP_hsi_f, fusion_f.detach()) - CC(HSIDP_hsi_d_f, fusion_d_f.detach())
+                loss_MSIDP = - CC(MSIDP_msi_f, fusion_f.detach()) - CC(MSIDP_msi_d_f, fusion_d_f.detach())
+                loss_same = F.mse_loss(HSIDP_hsi_f, MSIDP_msi_f) + F.mse_loss(HSIDP_hsi_d_f, MSIDP_msi_d_f)
+
+                loss_1 = 2 * (loss_HSIDP + loss_MSIDP + loss_same)
+                loss_2 = Lgrad(gt, gt, fusion_image_sample) + Loss.Loss_intensity(gt, gt, fusion_image_sample)
+
+                loss_correspondence_matrix, loss_correspondence_matrix_1 = Lcorrespondence(
+                    correspondence_matrixs, index_r)
+                loss_3 = 4 * (loss_correspondence_matrix + loss_correspondence_matrix_1)
+
+                loss = loss_0 + loss_1 + loss_2 + loss_3 + loss_fusion_1
+
+            # ========== 反向传播（混合精度） ==========
             optimizer_HSIDP.zero_grad()
             optimizer_MSIDP.zero_grad()
             optimizer_MHCSAhsi.zero_grad()
             optimizer_MHCSAmsi.zero_grad()
             optimizer_FusionModule.zero_grad()
             optimizer_FE.zero_grad()
-            loss.backward()
-            optimizer_FE.step()
-            optimizer_HSIDP.step()
-            optimizer_MSIDP.step()
-            optimizer_MHCSAhsi.step()
-            optimizer_MHCSAmsi.step()
-            optimizer_FusionModule.step()
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer_FE)
+            scaler.step(optimizer_HSIDP)
+            scaler.step(optimizer_MSIDP)
+            scaler.step(optimizer_MHCSAhsi)
+            scaler.step(optimizer_MHCSAmsi)
+            scaler.step(optimizer_FusionModule)
+            scaler.update()
+
+            # ✅ 显存清理
+            del hsi_f, msi_f, hsi_d_f, msi_d_f
+            del hsi_fe, msi_fe, hsi_d_fe, msi_d_fe
+            del HSIDP_hsi_f, MSIDP_msi_f, HSIDP_hsi_d_f, MSIDP_msi_d_f
+            del fusion_f, fusion_d_f, fusion_f_1, fusion_d_f_1
+            del correspondence_matrixs, msi_d_f_sample
+            del fixed_DP, moving_DP
+            torch.cuda.empty_cache()
 
             # 记录损失
             epoch_loss_HSIDP.append(loss_HSIDP.item())
@@ -348,16 +398,19 @@ if __name__ == '__main__':
                 epoch_step_name = str(epoch) + "epoch" + str(step) + "step"
                 if epoch % 2 == 0:
                     output_name = save_img_dir + "/" + epoch_step_name + ".jpg"
+                    # 上采样HSI用于可视化
+                    hsi_vis = F.interpolate(hsi, size=(msi.size(2), msi.size(3)), mode='bilinear', align_corners=False)
                     out = torch.cat([
-                        hsi_upsampled[:, :3, :, :],  # ✅ 使用上采样后的HSI
+                        hsi_vis[:, :3, :, :],
                         msi_d[:, :3, :, :],
                         fusion_image_1[:, :3, :, :],
                         fusion_image_sample[:, :3, :, :],
                         fusion_d_image_1[:, :3, :, :]
                     ], dim=3)
                     save_img(out, output_name)
+                    del hsi_vis
 
-            # 保存模型（同之前）
+            # 保存模型
             if ((epoch + 1) == args.args.Epoch and (step + 1) % iter_num == 0) or \
                     (epoch % args.args.save_model_num == 0 and (step + 1) % iter_num == 0):
                 ckpts = {
@@ -366,6 +419,8 @@ if __name__ == '__main__':
                     "msi_mfe": msi_MFE.state_dict(),
                     "hsi_mfe": hsi_MFE.state_dict(),
                     "pafe": PAFE.state_dict(),
+                    "fusion_decoder": fusion_decoder.state_dict(),
+                    "decoder": decoder.state_dict(),
                     "mn_msi": MN_msi.state_dict(),
                     "mn_hsi": MN_hsi.state_dict(),
                     "msi_dgfp": MSIDP.state_dict(),
@@ -376,6 +431,12 @@ if __name__ == '__main__':
                 }
                 save_dir = '{:s}/epoch{:d}_iter{:d}.pth'.format(save_model_dir, epoch, step + 1)
                 torch.save(ckpts, save_dir)
+                print(f"💾 模型已保存: {save_dir}")
+
+            # ✅ 最终清理
+            del hsi, msi, gt, hsi_d, msi_d
+            del fusion_image, fusion_d_image, fusion_image_1, fusion_d_image_1, fusion_image_sample
+            torch.cuda.empty_cache()
 
         # 打印epoch损失
         epoch_loss_correspondence_matrix_mean = np.mean(epoch_loss_correspondence_matrix)
@@ -385,16 +446,24 @@ if __name__ == '__main__':
         epoch_loss_same_mean = np.mean(epoch_loss_same)
 
         print()
-        print(" -epoch " + str(epoch))
-        print(" -loss_cm " + str(epoch_loss_correspondence_matrix_mean) +
-              " -loss_cp " + str(epoch_loss_correspondence_predict_mean))
-        print(" -loss_HSIDP " + str(epoch_loss_HSIDP_mean) +
-              " -loss_MSIDP " + str(epoch_loss_MSIDP_mean))
-        print(" -loss_same " + str(epoch_loss_same_mean))
+        print(f"📊 -epoch {epoch}")
+        print(
+            f"   -loss_cm {epoch_loss_correspondence_matrix_mean:.6f} -loss_cp {epoch_loss_correspondence_predict_mean:.6f}")
+        print(f"   -loss_HSIDP {epoch_loss_HSIDP_mean:.6f} -loss_MSIDP {epoch_loss_MSIDP_mean:.6f}")
+        print(f"   -loss_same {epoch_loss_same_mean:.6f}")
 
 
     # ========== 启动训练循环 ==========
-    for epoch in tqdm(range(args.args.Epoch)):
+    print("\n🚀 开始训练...")
+    print(f"📌 训练参数:")
+    print(f"   - Epochs: {args.args.Epoch}")
+    print(f"   - Batch Size: {args.args.batch_size}")
+    print(f"   - 训练样本数: {len(dataset)}")
+    print(f"   - 每epoch迭代数: {iter_num}")
+    print(f"   - 图像尺寸: {args.args.img_size}×{args.args.img_size}")
+    print(f"   - 混合精度: 已启用\n")
+
+    for epoch in tqdm(range(args.args.Epoch), desc="训练进度"):
         if epoch < args.args.Warm_epoch:
             warmup_learning_rate(optimizer_MHCSAhsi, epoch)
             warmup_learning_rate(optimizer_MHCSAmsi, epoch)
@@ -403,3 +472,5 @@ if __name__ == '__main__':
             adjust_learning_rate(optimizer_MHCSAmsi, epoch)
 
         train(epoch)
+
+    print("\n🎉 训练完成！")
