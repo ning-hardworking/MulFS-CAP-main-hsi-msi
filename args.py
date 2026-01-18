@@ -17,7 +17,7 @@ parser.add_argument('--save_model_num', dest='save_model_num', default=10, type=
 parser.add_argument('--img_size', type=int, default=512)
 parser.add_argument('--small_w_size', type=float, default=32)
 parser.add_argument('--large_w_size', type=float, default=52)
-parser.add_argument('--batch_size', dest='batch_size', default=1, type=int)
+parser.add_argument('--batch_size', dest='batch_size', default=1, type=int)#1
 parser.add_argument('--LR', type=float, default=0.0002)
 parser.add_argument('--LR_target', type=float, default=0.001)
 parser.add_argument('--Epoch', type=float, default=100)
