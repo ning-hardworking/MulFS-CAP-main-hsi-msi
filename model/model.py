@@ -8,9 +8,8 @@ from kornia.filters.kernels import get_gaussian_kernel2d
 
 class FeatureExtractor(nn.Module):
     """
-    特征提取器 - 适配多通道输入
-    原始：8通道输入111
-    现在：需要处理MSI(3通道)和HSI(31通道)的共同特征空间(64通道)
+    特征提取器 - 适配64通道输入（统一特征空间）
+    用于提取HSI和MSI的深层特征
     """
 
     def __init__(self, in_channels=64):
@@ -54,8 +53,7 @@ class FeatureExtractor(nn.Module):
 class Decoder(nn.Module):
     """
     解码器 - 输出31通道高光谱图像
-    原始：输出1通道灰度图
-    现在：输出31通道高光谱图像
+    将64通道特征解码为31通道高光谱图像
     """
 
     def __init__(self, out_channels=31):
@@ -106,18 +104,19 @@ class Decoder(nn.Module):
 
 class Enhance(nn.Module):
     """
-    增强模块 - 保持64通道
+    增强模块 - 使用实例归一化处理64通道特征
+    用于模态字典前的特征增强
     """
 
-    def __init__(self):
+    def __init__(self, channels=64):
         super(Enhance, self).__init__()
         self.E = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(64),
+            nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.Conv2d(in_channels=channels, out_channels=128, kernel_size=(3, 3), stride=1),
             nn.InstanceNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
@@ -129,8 +128,8 @@ class Enhance(nn.Module):
             nn.InstanceNorm2d(64),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(64),
+            nn.Conv2d(in_channels=64, out_channels=channels, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels),
             nn.ReLU(),
         )
 
@@ -141,18 +140,13 @@ class Enhance(nn.Module):
 
 class base(nn.Module):
     """
-    基础特征提取 - 适配不同输入通道
+    基础特征提取模块 - 分别处理MSI和HSI
     MSI: 3通道 -> 64通道
     HSI: 31通道 -> 64通道
     """
 
-    def __init__(self, in_channels=3, is_hsi=False):
+    def __init__(self, in_channels=3):
         super(base, self).__init__()
-        if is_hsi:
-            in_channels = 31  # HSI输入
-        else:
-            in_channels = 3  # MSI输入
-
         self.B = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
             nn.Conv2d(in_channels=in_channels, out_channels=32, kernel_size=(3, 3), stride=1),
@@ -175,7 +169,8 @@ class base(nn.Module):
 
 class FusionMoudle(nn.Module):
     """
-    融合模块 - 输出31通道
+    融合模块 - 输出31通道高光谱图像
+    将HSI和MSI的特征融合后输出高分辨率高光谱图像
     """
 
     def __init__(self, out_channels=31):
@@ -197,6 +192,7 @@ class FusionMoudle(nn.Module):
         """
         hsi: (B, 64, H, W) - HSI特征
         msi: (B, 64, H, W) - MSI特征
+        返回: (B, 31, H, W) - 融合的高光谱图像
         """
         x = hsi + msi
         out = self.D(x)
@@ -204,13 +200,12 @@ class FusionMoudle(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    "Implement the PE function."
+    """位置编码模块 - 用于Transformer"""
 
     def __init__(self, d_model, dropout, max_len=5000):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
-        # Compute the positional encodings once in log space.
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) *
@@ -228,7 +223,8 @@ class PositionalEncoding(nn.Module):
 
 class AffineTransform(nn.Module):
     """
-    仿射变换 - 支持多通道
+    仿射变换 - 支持多通道图像
+    用于数据增强，生成未配准的图像对
     """
 
     def __init__(self, degrees=0, translate=0.1, return_warp=False):
@@ -240,7 +236,6 @@ class AffineTransform(nn.Module):
         device = input.device
         batch_size, _, height, weight = input.shape
 
-        # 仿射变换
         warped, affine_param = self.trs(input)
 
         T = torch.FloatTensor([[2. / weight, 0, -1],
@@ -262,7 +257,8 @@ class AffineTransform(nn.Module):
 
 class ElasticTransform(nn.Module):
     """
-    弹性变换 - 支持多通道
+    弹性变换 - 支持多通道图像
+    用于模拟非刚性形变
     """
 
     def __init__(self, kernel_size=63, sigma=32, align_corners=False, mode="bilinear", return_warp=False):
@@ -325,7 +321,8 @@ class ElasticTransform(nn.Module):
 
 class ImageTransform(nn.Module):
     """
-    图像变换 - 支持多通道HSI和MSI
+    图像变换模块 - 组合仿射和弹性变换
+    支持HSI和MSI的多通道变换，自动处理分辨率差异
     """
 
     def __init__(self, ET_kernel_size=101, ET_kernel_sigma=16, AT_translate=0.01):
@@ -337,11 +334,9 @@ class ImageTransform(nn.Module):
         device = input.device
         batch_size, _, height, weight = input.size()
 
-        # 仿射变换
         affine_disp = self.affine(input)
-        # 弹性变换
         elastic_disp = self.elastic(input)
-        # 生成网格
+
         base = kornia.utils.create_meshgrid(height, weight).to(dtype=input.dtype).repeat(batch_size, 1, 1, 1).to(device)
         disp = affine_disp + elastic_disp
         grid = base + disp
@@ -377,23 +372,30 @@ class ImageTransform(nn.Module):
 
     def forward(self, image_1, image_2):
         """
-        image_1: HSI (B, 31, H, W)
-        image_2: MSI (B, 3, H, W)
-        注意：需要确保两者空间分辨率一致（通过上采样HSI或下采样MSI）
-        """
-        # ⚠️ 关键修改：需要先将HSI上采样到MSI的分辨率
-        if image_1.size(2) != image_2.size(2) or image_1.size(3) != image_2.size(3):
-            image_1 = F.interpolate(image_1, size=(image_2.size(2), image_2.size(3)),
-                                    mode='bilinear', align_corners=False)
+        image_1: HSI (B, 31, H_hsi, W_hsi) - 低分辨率高光谱
+        image_2: MSI (B, 3, H_msi, W_msi) - 高分辨率多光谱
 
-        # 生成变换网格（使用MSI的分辨率）
+        返回变换后的图像和变换矩阵
+        """
+        # 关键：将HSI上采样到MSI的分辨率以便应用相同的变换
+        if image_1.size(2) != image_2.size(2) or image_1.size(3) != image_2.size(3):
+            image_1_upsampled = F.interpolate(
+                image_1,
+                size=(image_2.size(2), image_2.size(3)),
+                mode='bilinear',
+                align_corners=False
+            )
+        else:
+            image_1_upsampled = image_1
+
+        # 基于MSI生成变换网格
         grid = self.generate_grid(image_2)
 
         # 生成变换矩阵
         index, index_r, filler = self.make_transform_matrix(grid)
 
         # 应用变换
-        image_1_warp = F.grid_sample(image_1, grid, align_corners=False, mode='bilinear')
+        image_1_warp = F.grid_sample(image_1_upsampled, grid, align_corners=False, mode='bilinear')
         image_2_warp = F.grid_sample(image_2, grid, align_corners=False, mode='bilinear')
 
         return image_1_warp, image_2_warp, index, index_r, filler
@@ -401,7 +403,8 @@ class ImageTransform(nn.Module):
 
 def window_partition(x, window_size, stride):
     """
-    窗口分割 - 支持多通道
+    窗口分割函数 - 支持多通道
+    将特征图分割成不重叠的窗口
     """
     batch_size, channel, height, weight = x.size()
     unfold_win = nn.Unfold(kernel_size=(window_size, window_size), stride=stride)
@@ -413,6 +416,10 @@ def window_partition(x, window_size, stride):
 
 
 class resume(nn.Module):
+    """
+    窗口重组模块 - 将窗口重组回完整特征图
+    """
+
     def __init__(self, height, weight, window_size, stride, channel):
         super(resume, self).__init__()
         self.channel = channel
@@ -429,7 +436,14 @@ class resume(nn.Module):
 
 def feature_reorganization(similaritys, x):
     """
-    特征重组 - 支持多通道
+    特征重组函数 - 基于相似度矩阵重组特征
+    用于根据对齐感知矩阵调整特征的空间位置
+
+    参数:
+        similaritys: (windows_num, batch_size, sw_size^2, lw_size^2) - 对齐矩阵
+        x: (batch_size, channel, height, weight) - 输入特征
+    返回:
+        sample: (batch_size, channel, height, weight) - 重组后的特征
     """
     device = similaritys.device
     windows_num, batch_size, sw_size_pow2, lw_size_pow2 = similaritys.size()
@@ -461,7 +475,13 @@ def feature_reorganization(similaritys, x):
 
 def df_window_partition(x, large_window_size, small_window_size, is_bewindow=True):
     """
-    可变形窗口分割 - 支持多通道
+    可变形窗口分割 - 支持边界处理的窗口分割
+
+    参数:
+        x: (batch_size, channel, height, weight) - 输入特征
+        large_window_size: 大窗口尺寸
+        small_window_size: 小窗口尺寸（步长）
+        is_bewindow: 是否返回窗口格式
     """
     batch_size, channel, height, weight = x.size()
     padding_num = int((large_window_size - small_window_size) / 2)
@@ -471,9 +491,9 @@ def df_window_partition(x, large_window_size, small_window_size, is_bewindow=Tru
     corner_unfold = nn.Unfold(kernel_size=(large_window_size, large_window_size),
                               stride=(height - large_window_size, weight - large_window_size))
     x_corner_w = corner_unfold(x)
+
     top_bottom_unfold = nn.Unfold(kernel_size=(large_window_size, large_window_size),
                                   stride=(height - large_window_size, small_window_size))
-
     x_top_bottom_w = top_bottom_unfold(F.pad(x, pad=[padding_num, padding_num, 0, 0]))
 
     left_right_unfold = nn.Unfold(kernel_size=(large_window_size, large_window_size),
@@ -529,6 +549,8 @@ def df_window_partition(x, large_window_size, small_window_size, is_bewindow=Tru
 class MHCSAB(nn.Module):
     """
     多头跨尺度注意力块 - 适配64通道特征
+    Multi-Head Cross-Scale Attention Block
+    用于增强特征的判别能力
     """
 
     def __init__(self, channels=64):
@@ -555,16 +577,310 @@ class MHCSAB(nn.Module):
             nn.InstanceNorm2d(channels // 2),
             nn.PReLU(),
         )
+
+        # 映射层：大尺度到小尺度
         self.mapping_l2s = nn.Sequential(
             nn.Linear(64, 16),
             nn.GELU(),
             nn.Linear(16, 4)
         )
+        # 映射层：小尺度到大尺度
         self.mapping_s2l = nn.Sequential(
             nn.Linear(4, 16),
             nn.GELU(),
             nn.Linear(16, 64)
         )
+
         self.Decoder = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(
+            nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels),
+            nn.PReLU(),
+            nn.ReflectionPad2d((1, 1, 1, 1)),
+            nn.Conv2d(in_channels=channels, out_channels=channels * 2, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels * 2),
+            nn.PReLU(),
+            nn.ReflectionPad2d((1, 1, 1, 1)),
+            nn.Conv2d(in_channels=channels * 2, out_channels=channels * 2, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels * 2),
+            nn.PReLU(),
+            nn.ReflectionPad2d((1, 1, 1, 1)),
+            nn.Conv2d(in_channels=channels * 2, out_channels=channels, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels),
+            nn.PReLU(),
+        )
+
+        self.largesize = 4
+        self.smallsize = 1
+        self.dropout = 0.1
+        self.channel = channels // 2  # 32通道
+
+        # 多头注意力机制
+        self.SA_large = nn.MultiheadAttention(self.largesize * self.largesize * self.channel, 1, self.dropout)
+        self.SA_small = nn.MultiheadAttention(self.smallsize * self.smallsize * self.channel, 1, self.dropout)
+        self.CA_large = nn.MultiheadAttention(self.largesize * self.largesize * self.channel, 1, self.dropout)
+        self.CA_small = nn.MultiheadAttention(self.smallsize * self.smallsize * self.channel, 1, self.dropout)
+
+    def self_attention(self, input_s, MHA):
+        """
+        自注意力机制
+        参数:
+            input_s: (patch_nums, batch_size, patch_size^2 * channel)
+            MHA: 多头注意力模块
+        返回:
+            enhance: 增强后的特征
+        """
+        embeding_dim = input_s.size()[2]
+        if MHA.training:
+            PE = PositionalEncoding(embeding_dim, self.dropout).train()
+        else:
+            PE = PositionalEncoding(embeding_dim, self.dropout).eval()
+        input_pe = PE(input_s)
+
+        q = input_pe
+        k = input_pe
+        v = input_s
+        a = MHA(q, k, v)[0]
+        enhance = a + input_s
+        return enhance
+
+    def cross_attention(self, query, key_value, MHA):
+        """
+        交叉注意力机制
+        参数:
+            query: 查询特征
+            key_value: 键值特征
+            MHA: 多头注意力模块
+        返回:
+            enhance: 增强后的特征
+        """
+        embeding_dim = query.size()[2]
+        if MHA.training:
+            PE = PositionalEncoding(embeding_dim, self.dropout).train()
+        else:
+            PE = PositionalEncoding(embeding_dim, self.dropout).eval()
+
+        q_pe = PE(query)
+        kv_pe = PE(key_value)
+
+        q = q_pe
+        k = kv_pe
+        v = key_value
+        a = MHA(q, k, v)[0]
+        enhance = a + query
+        return enhance
+
+    def forward(self, input):
+        """
+        前向传播
+        参数:
+            input: (B, 64, window_size, window_size)
+        返回:
+            enhance_f: (B, 64, window_size, window_size)
+        """
+        window_size = input.size()[3]
+        flod_win_l = nn.Fold(output_size=(window_size, window_size),
+                             kernel_size=(self.largesize, self.largesize),
+                             stride=self.largesize)
+        flod_win_s = nn.Fold(output_size=(window_size, window_size),
+                             kernel_size=(self.smallsize, self.smallsize),
+                             stride=self.smallsize)
+        unflod_win_l = nn.Unfold(kernel_size=(self.largesize, self.largesize), stride=self.largesize)
+        unflod_win_s = nn.Unfold(kernel_size=(self.smallsize, self.smallsize), stride=self.smallsize)
+
+        # 大尺度和小尺度特征提取
+        large_scale_f = self.LargeScaleEncoder(input)
+        small_scale_f = self.SmallScaleEncoder(input)
+
+        # 窗口分割
+        large_scale_f_w = unflod_win_l(large_scale_f).permute(2, 0, 1)
+        small_scale_f_w = unflod_win_s(small_scale_f).permute(2, 0, 1)
+
+        # 自注意力
+        large_scale_f_w_s = self.self_attention(large_scale_f_w, self.SA_large)
+        small_scale_f_w_s = self.self_attention(small_scale_f_w, self.SA_small)
+
+        l_size = large_scale_f_w_s.size()
+        s_size = small_scale_f_w_s.size()
+
+        # 尺度映射
+        large_scale_f_w_s_map2s = self.mapping_l2s(
+            large_scale_f_w_s.reshape(l_size[0] * l_size[1], l_size[2])
+        ).reshape(l_size[0], l_size[1], s_size[2])
+
+        small_scale_f_w_s_map2l = self.mapping_s2l(
+            small_scale_f_w_s.reshape(s_size[0] * s_size[1], s_size[2])
+        ).reshape(s_size[0], s_size[1], l_size[2])
+
+        # 交叉注意力
+        large_scale_f_w_s_c = self.cross_attention(large_scale_f_w_s, small_scale_f_w_s_map2l, self.CA_large)
+        small_scale_f_w_s_c = self.cross_attention(small_scale_f_w_s, large_scale_f_w_s_map2s, self.CA_small)
+
+        # 窗口重组
+        large_scale_f_s_c = flod_win_l(large_scale_f_w_s_c.permute(1, 2, 0))
+        small_scale_f_s_c = flod_win_s(small_scale_f_w_s_c.permute(1, 2, 0))
+
+        # 特征融合
+        enhance_f = torch.cat([large_scale_f_s_c, small_scale_f_s_c], dim=1)
+        enhance_f = self.Decoder(enhance_f)
+
+        return enhance_f
+
+
+class Attention(nn.Module):
+    """
+    注意力模块 - 计算特征之间的相似度
+    """
+
+    def __init__(self):
+        super(Attention, self).__init__()
+        self.unflod_win_1 = nn.Unfold(kernel_size=(1, 1), stride=1)
+
+    def c_similarity(self, s, r):
+        """
+        计算余弦相似度
+        参数:
+            s: (B, Nt, E) - 查询特征
+            r: (B, Ns, E) - 键特征
+        返回:
+            attn: (B, Nt, Ns) - 相似度矩阵
+        """
+        B, Nt, E = s.shape
+        s = s / math.sqrt(E)
+        attn = torch.bmm(s, r.transpose(-2, -1))
+        attn = F.softmax(attn, dim=-1)
+        return attn
+
+    def forward(self, fixed_window, moving_window):
+        """
+        前向传播
+        参数:
+            fixed_window: (B, C, H, W) - 固定窗口
+            moving_window: (B, C, H, W) - 移动窗口
+        返回:
+            similarity: (B, H*W, H*W) - 相似度矩阵
+        """
+        fixed_patch = self.unflod_win_1(fixed_window).permute(0, 2, 1)
+        moving_patch = self.unflod_win_1(moving_window).permute(0, 2, 1)
+        similarity = self.c_similarity(fixed_patch, moving_patch)
+        return similarity
+
+
+def CMAP(fixed_windows, moving_windows, hsi_MHCSA, msi_MHCSA, is_hsi_fixed):
+    """
+    跨模态对齐感知 (Cross-Modality Alignment Perception)
+
+    参数:
+        fixed_windows: (window_nums, batch_size, C, H, W) - 参考窗口（HSI）
+        moving_windows: (window_nums, batch_size, C, H, W) - 移动窗口（MSI）
+        hsi_MHCSA: HSI的多头注意力模块
+        msi_MHCSA: MSI的多头注意力模块
+        is_hsi_fixed: HSI是否为参考图像
+
+    返回:
+        similaritys: (window_nums, batch_size, H_f*W_f, H_m*W_m) - 对齐矩阵
+    """
+    assert (fixed_windows.size()[0] == moving_windows.size()[0])
+    att = Attention()
+    device = fixed_windows.device
+    window_nums, batch_size, _, window_size_f, _ = fixed_windows.size()
+    window_size_m = moving_windows.size()[3]
+
+    similaritys = torch.zeros(
+        (window_nums, batch_size, int(window_size_f * window_size_f), int(window_size_m * window_size_m)),
+        device=device
+    )
+
+    for i in range(window_nums):
+        fixed_window = fixed_windows[i, :, :, :, :]
+        moving_window = moving_windows[i, :, :, :, :]
+
+        if is_hsi_fixed:
+            fixed_enhance = hsi_MHCSA(fixed_window)
+            moving_enhance = msi_MHCSA(moving_window)
+        else:
+            fixed_enhance = msi_MHCSA(fixed_window)
+            moving_enhance = hsi_MHCSA(moving_window)
+
+        similarity = att(fixed_enhance, moving_enhance)
+        similaritys[i, :, :, :] = similarity
+
+    return similaritys
+
+
+class DictionaryRepresentationModule(nn.Module):
+    """
+    字典表示模块 - 适配64通道特征
+    用于学习模态字典，补偿单模态特征缺失的信息
+    """
+
+    def __init__(self, channels=64):
+        super(DictionaryRepresentationModule, self).__init__()
+        element_size = 4
+        self.element_size = element_size
+        self.channels = channels
+        l_n = 16  # 字典的行数
+        c_n = 16  # 字典的列数
+
+        # 可学习的模态字典
+        # shape: (256, 1, 1024) = (16*16, 1, 4*4*64)
+        self.Dictionary = nn.Parameter(
+            torch.FloatTensor(l_n * c_n, 1, element_size * element_size * channels).to(torch.device("cuda:0")),
+            requires_grad=True
+        )
+        nn.init.uniform_(self.Dictionary, 0, 1)
+
+        # 窗口展开和折叠
+        self.unflod_win = nn.Unfold(kernel_size=(element_size, element_size), stride=element_size)
+
+        # 交叉注意力
+        self.CA = nn.MultiheadAttention(
+            embed_dim=element_size * element_size * channels,
+            num_heads=1,
+            dropout=0
+        )
+
+        # 用于可视化字典
+        self.flod_win_1 = nn.Fold(
+            output_size=(l_n * element_size, c_n * element_size),
+            kernel_size=(element_size, element_size),
+            stride=element_size
+        )
+
+    def forward(self, x):
+        """
+        前向传播
+        参数:
+            x: (B, 64, H, W) - 输入特征
+        返回:
+            representation: (B, 64, H, W) - 字典补偿后的特征
+            visible_D: (1, 64, 64, 64) - 可视化的字典
+        """
+        size = x.size()
+
+        # 动态创建fold操作以匹配输入尺寸
+        flod_win = nn.Fold(
+            output_size=(size[2], size[3]),
+            kernel_size=(self.element_size, self.element_size),
+            stride=self.element_size
+        )
+
+        # 扩展字典以匹配batch size
+        D = self.Dictionary.repeat(1, size[0], 1)
+
+        # 将输入特征分割成patches
+        x_w = self.unflod_win(x).permute(2, 0, 1)  # (num_patches, batch_size, element_size^2*channels)
+
+        # 交叉注意力：用字典补偿特征
+        q = x_w
+        k = D
+        v = D
+        a = self.CA(q, k, v)[0]
+
+        # 重组为特征图
+        representation = flod_win(a.permute(1, 2, 0))
+
+        # 可视化字典
+        visible_D = self.flod_win_1(self.Dictionary.permute(1, 2, 0))
+
+        return representation, visible_D

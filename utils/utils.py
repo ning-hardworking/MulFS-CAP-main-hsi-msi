@@ -22,7 +22,6 @@ def load_state_dir(network, ckpts, device):
     network.to(device)
     network.eval()
 
-
 def save_img(x, save_dir):
     x = x.squeeze(dim=0).permute(1, 2, 0)
     x = x.cpu().detach().numpy()

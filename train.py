@@ -175,7 +175,8 @@ if __name__ == '__main__':
     Lcorrespondence = Loss.L_correspondence()
 
     with torch.no_grad():
-        base = model.base()
+        base_msi = model.base(in_channels=3)  # MSI: 3通道 -> 64通道
+        base_hsi = model.base(in_channels=31)  # HSI: 31通道 -> 64通道
         hsi_MFE = model.FeatureExtractor()  # 原vis_MFE -> hsi_MFE
         msi_MFE = model.FeatureExtractor()  # 原ir_MFE -> msi_MFE
         fusion_decoder = model.Decoder()
@@ -191,7 +192,8 @@ if __name__ == '__main__':
         fusion_module = model.FusionMoudle()
 
     # 模型训练模式+设备迁移
-    base.train().to(device)
+    base_msi.train().to(device)
+    base_hsi.train().to(device)
     hsi_MFE.train().to(device)
     msi_MFE.train().to(device)
     fusion_decoder.train().to(device)
@@ -206,7 +208,8 @@ if __name__ == '__main__':
     fusion_module.train().to(device)
 
     # ========== 优化器初始化 ==========
-    optimizer_FE = torch.optim.Adam([{'params': base.parameters()},
+    optimizer_FE = torch.optim.Adam([{'params': base_msi.parameters()},
+                                     {'params': base_hsi.parameters()},
                                      {'params': hsi_MFE.parameters()},
                                      {'params': msi_MFE.parameters()},
                                      {'params': fusion_decoder.parameters()},
@@ -231,23 +234,33 @@ if __name__ == '__main__':
         epoch_loss_correspondence_predict = []
 
         for step, x in enumerate(data_iter):
-            hsi = x[0].to(device, non_blocking=True)  # (B, 31, 16, 16) - 原vis
-            msi = x[1].to(device, non_blocking=True)  # (B, 3, 512, 512) - 原ir
+            hsi = x[0].to(device, non_blocking=True)  # (B, 31, 16, 16) - 原始低分辨率HSI
+            msi = x[1].to(device, non_blocking=True)  # (B, 3, 512, 512) - 原始高分辨率MSI
             gt = x[2].to(device, non_blocking=True)  # (B, 31, 512, 512)
 
-            # ⚠️ ImageDeformation需要适配多通道输入
+            # ========== ✅ 关键修复：先将HSI上采样到512×512 ==========
+            hsi_upsampled = F.interpolate(
+                hsi,
+                size=(msi.size(2), msi.size(3)),  # 上采样到512×512
+                mode='bilinear',
+                align_corners=False
+            )  # 现在 hsi_upsampled: (B, 31, 512, 512)
+
+            # ⚠️ ImageDeformation处理的是上采样后的HSI
             with torch.no_grad():
-                hsi_d, msi_d, _, index_r, _ = ImageDeformation(hsi, msi)
+                hsi_d, msi_d, _, index_r, _ = ImageDeformation(hsi_upsampled, msi)
 
-            # 特征提取
-            hsi_1 = base(hsi)
-            hsi_d_1 = base(hsi_d)
-            msi_1 = base(msi)
-            msi_d_1 = base(msi_d)
+            # ========== ✅ 现在所有输入都是512×512，尺寸匹配 ==========
+            # 特征提取 - 使用对应的base模块
+            hsi_1 = base_hsi(hsi_upsampled)  # (B, 31, 512, 512) -> (B, 64, 512, 512)
+            hsi_d_1 = base_hsi(hsi_d)  # (B, 31, 512, 512) -> (B, 64, 512, 512)
+            msi_1 = base_msi(msi)  # (B, 3, 512, 512) -> (B, 64, 512, 512)
+            msi_d_1 = base_msi(msi_d)  # (B, 3, 512, 512) -> (B, 64, 512, 512)
 
+            # 现在尺寸都是 (B, 64, 512, 512)，可以正常运算
             hsi_fe = hsi_MFE(hsi_1)
             msi_fe = msi_MFE(msi_1)
-            simple_fusion_f_1 = hsi_fe + msi_fe
+            simple_fusion_f_1 = hsi_fe + msi_fe  # ✅ 512×512 + 512×512 正常！
             fusion_image_1, fusion_f_1 = fusion_decoder(simple_fusion_f_1)
 
             hsi_d_fe = hsi_MFE(hsi_d_1)
@@ -286,8 +299,7 @@ if __name__ == '__main__':
             msi_d_f_sample = model.feature_reorganization(correspondence_matrixs, msi_d_fe)
             fusion_image_sample = fusion_module(hsi_fe, msi_d_f_sample)
 
-            # ========== 计算损失 ==========
-            # ⚠️ 这里需要用GT替换原来的hsi/msi作为参考
+            # ========== 计算损失（使用原始低分辨率HSI） ==========
             loss_fusion = Lgrad(gt, gt, fusion_image) + Loss.Loss_intensity(gt, gt, fusion_image) + \
                           Lgrad(gt, gt, fusion_d_image) + Loss.Loss_intensity(gt, gt, fusion_d_image)
 
@@ -336,22 +348,21 @@ if __name__ == '__main__':
                 epoch_step_name = str(epoch) + "epoch" + str(step) + "step"
                 if epoch % 2 == 0:
                     output_name = save_img_dir + "/" + epoch_step_name + ".jpg"
-                    # ⚠️ 这里需要调整可视化方式（多通道->RGB）
-                    # 暂时只保存第一个通道用于可视化
                     out = torch.cat([
-                        hsi[:, :3, :, :],  # 取前3个通道
-                        msi_d,
+                        hsi_upsampled[:, :3, :, :],  # ✅ 使用上采样后的HSI
+                        msi_d[:, :3, :, :],
                         fusion_image_1[:, :3, :, :],
                         fusion_image_sample[:, :3, :, :],
                         fusion_d_image_1[:, :3, :, :]
-                    ], dim=3)  # 水平拼接
+                    ], dim=3)
                     save_img(out, output_name)
 
-            # 保存模型
+            # 保存模型（同之前）
             if ((epoch + 1) == args.args.Epoch and (step + 1) % iter_num == 0) or \
                     (epoch % args.args.save_model_num == 0 and (step + 1) % iter_num == 0):
                 ckpts = {
-                    "bfe": base.state_dict(),
+                    "bfe_msi": base_msi.state_dict(),
+                    "bfe_hsi": base_hsi.state_dict(),
                     "msi_mfe": msi_MFE.state_dict(),
                     "hsi_mfe": hsi_MFE.state_dict(),
                     "pafe": PAFE.state_dict(),
