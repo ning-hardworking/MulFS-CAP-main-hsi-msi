@@ -5,7 +5,7 @@ parser = argparse.ArgumentParser(description='**MulFS-CAP**')
 parser.add_argument('--hsi_train_dir', default=r'D:/datas/CAVEdata/Z', type=str)
 parser.add_argument('--msi_train_dir', default=r'D:/datas/CAVEdata/Y', type=str)
 parser.add_argument('--gt_train_dir', default=r'D:/datas/CAVEdata/X', type=str)
-parser.add_argument('--GT_deformed_train_dir', default=r'D:/datas/CAVEdata/X_deformed', type=str)#存放对GT图像做形变之后的GT图像
+parser.add_argument('--gt_deformed_train_dir', default=r'D:/datas/CAVEdata/X_deformed', type=str)#存放对GT图像做形变之后的GT图像
 parser.add_argument('--hsi_test_dir', default=r'D:/datas/CAVEdata/Z', type=str)
 parser.add_argument('--msi_test_dir', default=r'D:/datas/CAVEdata/Y', type=str)
 

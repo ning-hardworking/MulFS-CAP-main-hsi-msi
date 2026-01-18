@@ -7,36 +7,42 @@ from kornia.filters.kernels import get_gaussian_kernel2d
 
 
 class FeatureExtractor(nn.Module):
-    def __init__(self):
+    """
+    特征提取器 - 适配多通道输入
+    原始：8通道输入
+    现在：需要处理MSI(3通道)和HSI(31通道)的共同特征空间(64通道)
+    """
+
+    def __init__(self, in_channels=64):
         super(FeatureExtractor, self).__init__()
         self.E = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(in_channels=in_channels, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=32, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(in_channels=256, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(in_channels=128, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
         )
 
@@ -46,44 +52,50 @@ class FeatureExtractor(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self):
+    """
+    解码器 - 输出31通道高光谱图像
+    原始：输出1通道灰度图
+    现在：输出31通道高光谱图像
+    """
+
+    def __init__(self, out_channels=31):
         super(Decoder, self).__init__()
         self.D_0 = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(64),
         )
         self.D = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=(3, 3), stride=1),
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.ReflectionPad2d((1, 1, 1, 1)),
+            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.ReflectionPad2d((1, 1, 1, 1)),
+            nn.Conv2d(in_channels=256, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.ReflectionPad2d((1, 1, 1, 1)),
+            nn.Conv2d(in_channels=128, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.ReflectionPad2d((1, 1, 1, 1)),
+            nn.Conv2d(in_channels=64, out_channels=32, kernel_size=(3, 3), stride=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=32, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=4, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(4),
-            nn.ReLU(),
-            nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=4, out_channels=1, kernel_size=(3, 3), stride=1),
+            nn.Conv2d(in_channels=32, out_channels=out_channels, kernel_size=(3, 3), stride=1),
         )
 
     def forward(self, x):
@@ -93,28 +105,32 @@ class Decoder(nn.Module):
 
 
 class Enhance(nn.Module):
+    """
+    增强模块 - 保持64通道
+    """
+
     def __init__(self):
         super(Enhance, self).__init__()
         self.E = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(8),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(64),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(16),
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(16),
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(128),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(8),
+            nn.Conv2d(in_channels=128, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(64),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(8),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(64),
             nn.ReLU(),
         )
 
@@ -124,20 +140,31 @@ class Enhance(nn.Module):
 
 
 class base(nn.Module):
-    def __init__(self):
+    """
+    基础特征提取 - 适配不同输入通道
+    MSI: 3通道 -> 64通道
+    HSI: 31通道 -> 64通道
+    """
+
+    def __init__(self, in_channels=3, is_hsi=False):
         super(base, self).__init__()
+        if is_hsi:
+            in_channels = 31  # HSI输入
+        else:
+            in_channels = 3  # MSI输入
+
         self.B = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=1, out_channels=4, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(4),
+            nn.Conv2d(in_channels=in_channels, out_channels=32, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=4, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
         )
 
@@ -147,23 +174,31 @@ class base(nn.Module):
 
 
 class FusionMoudle(nn.Module):
-    def __init__(self):
+    """
+    融合模块 - 输出31通道
+    """
+
+    def __init__(self, out_channels=31):
         super(FusionMoudle, self).__init__()
         self.D = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=4, kernel_size=(3, 3), stride=1),
-            nn.BatchNorm2d(4),
+            nn.Conv2d(in_channels=64, out_channels=32, kernel_size=(3, 3), stride=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=4, out_channels=1, kernel_size=(3, 3), stride=1),
+            nn.Conv2d(in_channels=32, out_channels=out_channels, kernel_size=(3, 3), stride=1),
         )
 
-    def forward(self, vis, ir):
-        x = vis + ir
+    def forward(self, hsi, msi):
+        """
+        hsi: (B, 64, H, W) - HSI特征
+        msi: (B, 64, H, W) - MSI特征
+        """
+        x = hsi + msi
         out = self.D(x)
         return out
 
@@ -193,10 +228,7 @@ class PositionalEncoding(nn.Module):
 
 class AffineTransform(nn.Module):
     """
-    Add random affine transforms to a tensor image.
-    Most functions are obtained from Kornia, difference:
-    - gain the disp grid
-    - no p and same_on_batch
+    仿射变换 - 支持多通道
     """
 
     def __init__(self, degrees=0, translate=0.1, return_warp=False):
@@ -205,11 +237,11 @@ class AffineTransform(nn.Module):
         self.return_warp = return_warp
 
     def forward(self, input):
-        # image shape
         device = input.device
         batch_size, _, height, weight = input.shape
-        # affine transform
-        warped, affine_param = self.trs(input)  # [batch_size, 3, 3]
+
+        # 仿射变换
+        warped, affine_param = self.trs(input)
 
         T = torch.FloatTensor([[2. / weight, 0, -1],
                                [0, 2. / height, -1],
@@ -217,12 +249,12 @@ class AffineTransform(nn.Module):
         theta = torch.inverse(torch.bmm(torch.bmm(T, affine_param), torch.inverse(T)))
 
         base = kornia.utils.create_meshgrid(height, weight, device=device).to(input.dtype)
-        grid = F.affine_grid(theta[:, :2, :], size=input.size(), align_corners=False)  # [batch_size, height, weight, 2]
+        grid = F.affine_grid(theta[:, :2, :], size=input.size(), align_corners=False)
 
         disp = grid - base
 
         if self.return_warp:
-            warped_grid_sample = F.grid_sample(input, grid)
+            warped_grid_sample = F.grid_sample(input, grid, align_corners=False, mode='bilinear')
             return warped_grid_sample, disp
         else:
             return disp
@@ -230,10 +262,7 @@ class AffineTransform(nn.Module):
 
 class ElasticTransform(nn.Module):
     """
-    Add random elastic transforms to a tensor image.
-    Most functions are obtained from Kornia, difference:
-    - gain the disp grid
-    - no p and same_on_batch
+    弹性变换 - 支持多通道
     """
 
     def __init__(self, kernel_size=63, sigma=32, align_corners=False, mode="bilinear", return_warp=False):
@@ -245,11 +274,10 @@ class ElasticTransform(nn.Module):
         self.return_warp = return_warp
 
     def forward(self, input):
-        # generate noise
         batch_size, _, height, weight = input.shape
         device = input.device
         noise = torch.rand(batch_size, 2, height, weight, device=device) * 2 - 1
-        # elastic transform
+
         if self.return_warp:
             warped, disp = self.elastic_transform2d(input, noise)
             return warped, disp
@@ -270,27 +298,22 @@ class ElasticTransform(nn.Module):
         if not len(noise.shape) == 4 or noise.shape[1] != 2:
             raise ValueError(f"Invalid noise shape, we expect Bx2xHxW. Got: {noise.shape}")
 
-        # unpack hyper parameters
         device = image.device
 
-        # Get Gaussian kernel for 'y' and 'x' displacement
         kernel_x: torch.Tensor = get_gaussian_kernel2d((self.kernel_size, self.kernel_size), (self.sigma, self.sigma))[
             None]
         kernel_y: torch.Tensor = get_gaussian_kernel2d((self.kernel_size, self.kernel_size), (self.sigma, self.sigma))[
             None]
 
-        # Convolve over a random displacement matrix and scale them with 'alpha'
         disp_x: torch.Tensor = noise[:, :1].to(device)
         disp_y: torch.Tensor = noise[:, 1:].to(device)
 
         disp_x = kornia.filters.filter2d(disp_x, kernel=kernel_y, border_type="constant")
         disp_y = kornia.filters.filter2d(disp_y, kernel=kernel_x, border_type="constant")
 
-        # stack and normalize displacement
         disp = torch.cat([disp_x, disp_y], dim=1).permute(0, 2, 3, 1)
 
         if self.return_warp:
-            # Warp image based on displacement matrix
             b, c, h, w = image.shape
             base = kornia.utils.create_meshgrid(h, w, device=image.device).to(image.dtype)
             grid = (base + disp).clamp(-1, 1)
@@ -301,6 +324,10 @@ class ElasticTransform(nn.Module):
 
 
 class ImageTransform(nn.Module):
+    """
+    图像变换 - 支持多通道HSI和MSI
+    """
+
     def __init__(self, ET_kernel_size=101, ET_kernel_sigma=16, AT_translate=0.01):
         super(ImageTransform, self).__init__()
         self.affine = AffineTransform(translate=AT_translate)
@@ -309,11 +336,12 @@ class ImageTransform(nn.Module):
     def generate_grid(self, input):
         device = input.device
         batch_size, _, height, weight = input.size()
-        # affine transform
-        affine_disp = self.affine(input)  # warped, warped_grid_sample, disp
-        # elastic transform
+
+        # 仿射变换
+        affine_disp = self.affine(input)
+        # 弹性变换
         elastic_disp = self.elastic(input)
-        # make grid
+        # 生成网格
         base = kornia.utils.create_meshgrid(height, weight).to(dtype=input.dtype).repeat(batch_size, 1, 1, 1).to(device)
         disp = affine_disp + elastic_disp
         grid = base + disp
@@ -348,14 +376,23 @@ class ImageTransform(nn.Module):
         return index, index_r, filler
 
     def forward(self, image_1, image_2):
-        assert (image_1.size() == image_2.size())
+        """
+        image_1: HSI (B, 31, H, W)
+        image_2: MSI (B, 3, H, W)
+        注意：需要确保两者空间分辨率一致（通过上采样HSI或下采样MSI）
+        """
+        # ⚠️ 关键修改：需要先将HSI上采样到MSI的分辨率
+        if image_1.size(2) != image_2.size(2) or image_1.size(3) != image_2.size(3):
+            image_1 = F.interpolate(image_1, size=(image_2.size(2), image_2.size(3)),
+                                    mode='bilinear', align_corners=False)
 
-        # generate grid that affine and elastic
-        grid = self.generate_grid(image_1)
+        # 生成变换网格（使用MSI的分辨率）
+        grid = self.generate_grid(image_2)
 
-        # make tranform matrix
+        # 生成变换矩阵
         index, index_r, filler = self.make_transform_matrix(grid)
 
+        # 应用变换
         image_1_warp = F.grid_sample(image_1, grid, align_corners=False, mode='bilinear')
         image_2_warp = F.grid_sample(image_2, grid, align_corners=False, mode='bilinear')
 
@@ -363,14 +400,14 @@ class ImageTransform(nn.Module):
 
 
 def window_partition(x, window_size, stride):
-    # x: [batch_size, channels, height, weight]
+    """
+    窗口分割 - 支持多通道
+    """
     batch_size, channel, height, weight = x.size()
     unfold_win = nn.Unfold(kernel_size=(window_size, window_size), stride=stride)
-    x_windows = unfold_win(x)  # [batch_size, p_w * p_w * channel, patch_nums]
-    x_out_windows = x_windows.reshape(batch_size, channel, window_size, window_size, x_windows.size()[2]).permute(4,
-                                                                                                                  0,
-                                                                                                                  1,
-                                                                                                                  2,
+    x_windows = unfold_win(x)
+    x_out_windows = x_windows.reshape(batch_size, channel, window_size, window_size, x_windows.size()[2]).permute(4, 0,
+                                                                                                                  1, 2,
                                                                                                                   3)
     return x_out_windows
 
@@ -392,9 +429,7 @@ class resume(nn.Module):
 
 def feature_reorganization(similaritys, x):
     """
-    :param similaritys: [windows_num, batch_size, small_window_size * small_window_size, large_window_size * large_window_size]
-    :param x: [batch_size, channel, height, weight]
-    :return:
+    特征重组 - 支持多通道
     """
     device = similaritys.device
     windows_num, batch_size, sw_size_pow2, lw_size_pow2 = similaritys.size()
@@ -426,11 +461,7 @@ def feature_reorganization(similaritys, x):
 
 def df_window_partition(x, large_window_size, small_window_size, is_bewindow=True):
     """
-    :param is_bewindow:
-    :param small_window_size:
-    :param large_window_size:
-    :param x: [batch_size, channel, height, weight]
-    :return:
+    可变形窗口分割 - 支持多通道
     """
     batch_size, channel, height, weight = x.size()
     padding_num = int((large_window_size - small_window_size) / 2)
@@ -458,10 +489,10 @@ def df_window_partition(x, large_window_size, small_window_size, is_bewindow=Tru
     mask = m_fold(m_unfold(m))
 
     mask[:, :, 0, :] = 3
-    mask[:, :, height_block_num-1, :] = 3
-    mask[:, :, height_block_num-1, weight_block_num-1] = 1
-    mask[:, :, 0, weight_block_num-1] = 1
-    mask[:, :, height_block_num-1, 0] = 1
+    mask[:, :, height_block_num - 1, :] = 3
+    mask[:, :, height_block_num - 1, weight_block_num - 1] = 1
+    mask[:, :, 0, weight_block_num - 1] = 1
+    mask[:, :, height_block_num - 1, 0] = 1
     mask[:, :, 0, 0] = 1
 
     windows = torch.zeros_like(x_center_w)
@@ -473,54 +504,55 @@ def df_window_partition(x, large_window_size, small_window_size, is_bewindow=Tru
         for j in range(weight_block_num):
             index = i * weight_block_num + j
             c = mask[0, 0, i, j]
-            if c == 4:  # center
+            if c == 4:
                 windows[:, :, index] = x_center_w[:, :, index]
-            elif c == 2:  # left and right
+            elif c == 2:
                 windows[:, :, index] = x_left_right_w[:, :, lr_index]
                 lr_index += 1
-            elif c == 3:  # top and bottom
-                if tb_index == weight_block_num-1:
+            elif c == 3:
+                if tb_index == weight_block_num - 1:
                     tb_index += 2
                 windows[:, :, index] = x_top_bottom_w[:, :, tb_index]
                 tb_index += 1
-            elif c == 1:  # corner
+            elif c == 1:
                 windows[:, :, index] = x_corner_w[:, :, corner_index]
                 corner_index += 1
 
     if is_bewindow:
         out_windows = windows.reshape(batch_size, channel, large_window_size, large_window_size,
-                                      windows.size()[2]).permute(
-            4,
-            0,
-            1,
-            2,
-            3)
+                                      windows.size()[2]).permute(4, 0, 1, 2, 3)
     else:
         out_windows = windows
     return out_windows
 
 
 class MHCSAB(nn.Module):
-    def __init__(self):
+    """
+    多头跨尺度注意力块 - 适配64通道特征
+    """
+
+    def __init__(self, channels=64):
         super(MHCSAB, self).__init__()
+        self.channels = channels
+
         self.LargeScaleEncoder = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=4, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(4),
+            nn.Conv2d(in_channels=channels, out_channels=channels // 2, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels // 2),
             nn.PReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=4, out_channels=4, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(4),
+            nn.Conv2d(in_channels=channels // 2, out_channels=channels // 2, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels // 2),
             nn.PReLU(),
         )
         self.SmallScaleEncoder = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=4, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(4),
+            nn.Conv2d(in_channels=channels, out_channels=channels // 2, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels // 2),
             nn.PReLU(),
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=4, out_channels=4, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(4),
+            nn.Conv2d(in_channels=channels // 2, out_channels=channels // 2, kernel_size=(3, 3), stride=1),
+            nn.InstanceNorm2d(channels // 2),
             nn.PReLU(),
         )
         self.mapping_l2s = nn.Sequential(
@@ -535,185 +567,4 @@ class MHCSAB(nn.Module):
         )
         self.Decoder = nn.Sequential(
             nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(8),
-            nn.PReLU(),
-            nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=8, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(16),
-            nn.PReLU(),
-            nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(16),
-            nn.PReLU(),
-            nn.ReflectionPad2d((1, 1, 1, 1)),
-            nn.Conv2d(in_channels=16, out_channels=8, kernel_size=(3, 3), stride=1),
-            nn.InstanceNorm2d(8),
-            nn.PReLU(),
-        )
-        self.largesize = 4
-        self.smallsize = 1
-        self.dropout = 0.1
-        self.channel = 4
-        self.SA_large = nn.MultiheadAttention(self.largesize * self.largesize * self.channel, 1, self.dropout)
-        self.SA_small = nn.MultiheadAttention(self.smallsize * self.smallsize * self.channel, 1, self.dropout)
-        self.CA_large = nn.MultiheadAttention(self.largesize * self.largesize * self.channel, 1, self.dropout)
-        self.CA_small = nn.MultiheadAttention(self.smallsize * self.smallsize * self.channel, 1, self.dropout)
-
-    def self_attention(self, input_s, MHA):
-        """
-        :param MHA:
-        :param input_s: [batch_size, patch_nums, patch_size * patch_size * channel]
-        :return:
-        """
-        embeding_dim = input_s.size()[2]
-        if MHA.training:
-            PE = PositionalEncoding(embeding_dim, self.dropout).train()
-        else:
-            PE = PositionalEncoding(embeding_dim, self.dropout).eval()
-        input_pe = PE(input_s)
-
-        q = input_pe
-        k = input_pe
-        v = input_s
-        a = MHA(q, k, v)[0]
-        enhance = a + input_s
-        return enhance
-
-    def cross_attention(self, query, key_value, MHA):
-        """
-        :param MHA:
-        :param query:
-        :param key_value:
-        :return:
-        """
-        embeding_dim = query.size()[2]
-        if MHA.training:
-            PE = PositionalEncoding(embeding_dim, self.dropout).train()
-        else:
-            PE = PositionalEncoding(embeding_dim, self.dropout).eval()
-
-        q_pe = PE(query)
-        kv_pe = PE(key_value)
-
-        q = q_pe
-        k = kv_pe
-        v = key_value
-        a = MHA(q, k, v)[0]
-        enhance = a + query
-        return enhance
-
-    def forward(self, input):
-        window_size = input.size()[3]
-        flod_win_l = nn.Fold(output_size=(window_size, window_size), kernel_size=(self.largesize, self.largesize),
-                             stride=self.largesize)
-        flod_win_s = nn.Fold(output_size=(window_size, window_size), kernel_size=(self.smallsize, self.smallsize),
-                             stride=self.smallsize)
-        unflod_win_l = nn.Unfold(kernel_size=(self.largesize, self.largesize), stride=self.largesize)
-        unflod_win_s = nn.Unfold(kernel_size=(self.smallsize, self.smallsize), stride=self.smallsize)
-
-        large_scale_f = self.LargeScaleEncoder(input)
-        small_scale_f = self.SmallScaleEncoder(input)
-
-        large_scale_f_w = unflod_win_l(large_scale_f).permute(2, 0, 1)
-        small_scale_f_w = unflod_win_s(small_scale_f).permute(2, 0, 1)
-
-        large_scale_f_w_s = self.self_attention(large_scale_f_w, self.SA_large)
-        small_scale_f_w_s = self.self_attention(small_scale_f_w, self.SA_small)
-
-        l_size = large_scale_f_w_s.size()
-        s_size = small_scale_f_w_s.size()
-
-        large_scale_f_w_s_map2s = self.mapping_l2s(large_scale_f_w_s.reshape(l_size[0] * l_size[1], l_size[2])).reshape(
-            l_size[0], l_size[1], s_size[2])
-        small_scale_f_w_s_map2l = self.mapping_s2l(small_scale_f_w_s.reshape(s_size[0] * s_size[1], s_size[2])).reshape(
-            s_size[0], s_size[1], l_size[2])
-
-        large_scale_f_w_s_c = self.cross_attention(large_scale_f_w_s, small_scale_f_w_s_map2l, self.CA_large)
-        small_scale_f_w_s_c = self.cross_attention(small_scale_f_w_s, large_scale_f_w_s_map2s, self.CA_small)
-
-        large_scale_f_s_c = flod_win_l(large_scale_f_w_s_c.permute(1, 2, 0))
-        small_scale_f_s_c = flod_win_s(small_scale_f_w_s_c.permute(1, 2, 0))
-
-        enhance_f = torch.cat([large_scale_f_s_c, small_scale_f_s_c], dim=1)
-        enhance_f = self.Decoder(enhance_f)
-
-        return enhance_f
-
-
-class Attention(nn.Module):
-    def __init__(self):
-        super(Attention, self).__init__()
-        self.unflod_win_1 = nn.Unfold(kernel_size=(1, 1), stride=1)
-
-    def c_similarity(self, s, r):
-        B, Nt, E = s.shape
-        s = s / math.sqrt(E)
-        # (B, Nt, E) x (B, E, Ns) -> (B, Nt, Ns)
-        attn = torch.bmm(s, r.transpose(-2, -1))
-        attn = F.softmax(attn, dim=-1)
-        return attn
-
-    def forward(self, fixed_window, moving_window):
-        fixed_patch = self.unflod_win_1(fixed_window).permute(0, 2, 1)
-        moving_patch = self.unflod_win_1(moving_window).permute(0, 2, 1)
-        similarity = self.c_similarity(fixed_patch, moving_patch)
-        return similarity
-
-
-def CMAP(fixed_windows, moving_windows, vis_MHCSA, ir_MHCSA, is_vis_fixed):
-    assert (fixed_windows.size()[0] == fixed_windows.size()[0])
-    att = Attention()
-    device = fixed_windows.device
-    window_nums, batch_size, _, window_size_f, _ = fixed_windows.size()
-    window_size_m = moving_windows.size()[3]
-    similaritys = torch.zeros(
-        (window_nums, batch_size, int(window_size_f * window_size_f), int(window_size_m * window_size_m)),
-        device=device)
-    for i in range(window_nums):
-        fixed_window = fixed_windows[i, :, :, :, :]  # [batch_size, channel, w_size, w_size]
-        moving_window = moving_windows[i, :, :, :, :]  # [batch_size, channel, w_size, w_size]
-        if is_vis_fixed:
-            fixed_enhance = vis_MHCSA(fixed_window)
-            moving_enhance = ir_MHCSA(moving_window)
-        else:
-            fixed_enhance = ir_MHCSA(fixed_window)
-            moving_enhance = vis_MHCSA(moving_window)
-        similarity = att(fixed_enhance, moving_enhance)
-        similaritys[i, :, :, :] = similarity  # window_nums, batch_size, window_size * window_size
-    return similaritys
-
-
-class DictionaryRepresentationModule(nn.Module):
-    def __init__(self):
-        super(DictionaryRepresentationModule, self).__init__()
-        element_size = 4
-        self.element_size = element_size
-        channel = 8
-        l_n = 16
-        c_n = 16
-        self.Dictionary = nn.Parameter(
-            torch.FloatTensor(l_n * c_n, 1, element_size * element_size * channel).to(torch.device("cuda:0")),
-            requires_grad=True)
-        nn.init.uniform_(self.Dictionary, 0, 1)
-        self.unflod_win = nn.Unfold(kernel_size=(element_size, element_size), stride=element_size)
-        self.CA = nn.MultiheadAttention(embed_dim=element_size * element_size * channel, num_heads=1, dropout=0)
-        self.flod_win_1 = nn.Fold(output_size=(l_n * element_size, c_n * element_size),
-                                  kernel_size=(element_size, element_size), stride=element_size)
-
-    def forward(self, x):
-        size = x.size()
-        flod_win = nn.Fold(output_size=(size[2], size[3]), kernel_size=(self.element_size, self.element_size),
-                           stride=self.element_size)
-        D = self.Dictionary.repeat(1, size[0], 1)
-        x_w = self.unflod_win(x).permute(2, 0, 1)
-
-        q = x_w
-        k = D
-        v = D
-        a = self.CA(q, k, v)[0]
-
-        representation = flod_win(a.permute(1, 2, 0))
-        visible_D = self.flod_win_1(self.Dictionary.permute(1, 2, 0))
-
-        return representation, visible_D
+            nn.Conv2d(
