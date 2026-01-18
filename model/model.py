@@ -9,7 +9,7 @@ from kornia.filters.kernels import get_gaussian_kernel2d
 class FeatureExtractor(nn.Module):
     """
     特征提取器 - 适配多通道输入
-    原始：8通道输入
+    原始：8通道输入111
     现在：需要处理MSI(3通道)和HSI(31通道)的共同特征空间(64通道)
     """
 
