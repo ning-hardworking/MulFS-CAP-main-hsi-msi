@@ -550,7 +550,7 @@ if __name__ == "__main__":
 
     # ========== 方式1: 训练退化网络（第一次运行时使用）==========
     # 如果你还没有训练过退化网络，取消下面这行的注释
-    # hsi_degen, msi_degen = train_deep_degenerators()
+    hsi_degen, msi_degen = train_deep_degenerators()
 
     # ========== 方式2: 加载已训练的权重（推荐）==========
     # 如果你已经训练过，直接加载权重

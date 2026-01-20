@@ -12,21 +12,58 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
 def Loss_intensity(hsi, msi, image_fused):
     """
-    强度损失
-    注意：现在hsi是31通道，msi是3通道，需要特殊处理
+    ✅ 完全适配31通道的强度损失
+    Args:
+        hsi: (B, 31, 4, 4) - 低分辨率HSI
+        msi: (B, 3, 128, 128) - 高分辨率MSI
+        image_fused: (B, 31, 128, 128) - 融合结果（31通道高光谱）
+
+    核心思想：
+    1. HSI损失：监督所有31个通道
+    2. MSI损失：将31通道的融合结果转换为3通道后与MSI比较
     """
-    # 对于HSI-MSI融合，融合结果应该接近GT（31通道）
-    # 这里假设image_fused是31通道的融合结果
-    hsi_li = F.l1_loss(image_fused, hsi)
-    # MSI只有3通道，可以只比较前3个通道
-    msi_li = F.l1_loss(image_fused[:, :3, :, :], msi)
-    li = hsi_li + msi_li
-    return li
+    # ========== 1. HSI损失（31通道完整监督）==========
+    # 将融合结果下采样到HSI分辨率
+    fused_downsampled = F.interpolate(
+        image_fused,
+        size=(hsi.size(2), hsi.size(3)),  # 下采样到 4×4
+        mode='bilinear',
+        align_corners=False
+    )
+    # ✅ 对所有31个通道进行L1损失计算
+    hsi_li = F.l1_loss(fused_downsampled, hsi)
+
+    # ========== 2. MSI损失（31通道 → 3通道转换）==========
+    # 方案A：使用学习到的线性组合（推荐，更灵活）
+    # 这里简化为对所有31个通道求平均后重复3次
+    # 更好的方式是用一个1x1卷积层学习最佳的通道组合
+
+    # ✅ 简化方案：对31个通道按RGB波段分组求平均
+    # 假设波段0-10对应蓝色，11-20对应绿色，21-30对应红色
+    B, C, H, W = image_fused.shape
+
+    # 方法1：均匀分组（简单但有效）
+    band_per_channel = C // 3  # 31 // 3 = 10
+    r_band = image_fused[:, :band_per_channel, :, :].mean(dim=1, keepdim=True)  # 前10个波段
+    g_band = image_fused[:, band_per_channel:2 * band_per_channel, :, :].mean(dim=1, keepdim=True)  # 中10个
+    b_band = image_fused[:, 2 * band_per_channel:, :, :].mean(dim=1, keepdim=True)  # 后11个
+
+    fused_rgb = torch.cat([r_band, g_band, b_band], dim=1)  # (B, 3, H, W)
+
+    # 方法2：使用特定波段（如果知道光谱响应曲线）
+    # fused_rgb = image_fused[:, [9, 19, 29], :, :]  # 选择特定波段
+
+    # ✅ 与MSI进行L1损失计算
+    msi_li = F.l1_loss(fused_rgb, msi)
+
+    # ========== 3. 总损失 ==========
+    return hsi_li + msi_li
 
 
 class L_Grad(nn.Module):
     """
-    梯度损失 - 已适配多通道
+    ✅ 完全适配31通道的梯度损失
+    对所有31个通道分别计算梯度，然后聚合
     """
 
     def __init__(self):
@@ -35,32 +72,100 @@ class L_Grad(nn.Module):
 
     def forward(self, img1, img2, image_fused=None):
         """
-        对于HSI-MSI：
-        - img1: GT (31, H, W) 或 HSI
-        - img2: GT (31, H, W) 或 MSI
-        - image_fused: 融合结果 (31, H, W)
+        Args:
+            img1: HSI (B, 31, 4, 4) 或 (B, 31, 16, 16)
+            img2: MSI (B, 3, 128, 128)
+            image_fused: 融合结果 (B, 31, 128, 128) 或 None
+
+        核心思想：
+        1. 对HSI的31个通道分别计算梯度
+        2. 对MSI的3个通道分别计算梯度
+        3. 对融合结果的31个通道分别计算梯度
+        4. 通过通道聚合进行比较
         """
         if image_fused is None:
-            # 计算所有通道的平均梯度
-            gradient_1 = self.sobelconv(img1)
-            gradient_2 = self.sobelconv(img2)
+            # ========== 场景1：只比较两张图像（用于配准对）==========
+            # 将HSI上采样到MSI的分辨率
+            if img1.size(2) != img2.size(2) or img1.size(3) != img2.size(3):
+                img1_up = F.interpolate(
+                    img1,
+                    size=(img2.size(2), img2.size(3)),
+                    mode='bilinear',
+                    align_corners=False
+                )
+            else:
+                img1_up = img1
+
+            # ✅ 对所有31个通道计算梯度
+            gradient_1_all = self.sobelconv(img1_up)  # (B, 31, H, W)
+
+            # 将31通道梯度转换为3通道（与MSI对应）
+            C = gradient_1_all.size(1)
+            band_per_channel = C // 3
+            gradient_1_r = gradient_1_all[:, :band_per_channel, :, :].mean(dim=1, keepdim=True)
+            gradient_1_g = gradient_1_all[:, band_per_channel:2 * band_per_channel, :, :].mean(dim=1, keepdim=True)
+            gradient_1_b = gradient_1_all[:, 2 * band_per_channel:, :, :].mean(dim=1, keepdim=True)
+            gradient_1 = torch.cat([gradient_1_r, gradient_1_g, gradient_1_b], dim=1)
+
+            gradient_2 = self.sobelconv(img2)  # (B, 3, H, W)
             Loss_gradient = F.l1_loss(gradient_1, gradient_2)
             return Loss_gradient
         else:
-            # 计算融合图像与输入图像的梯度损失
-            gradient_1 = self.sobelconv(img1)
-            gradient_2 = self.sobelconv(img2)
-            gradient_fused = self.sobelconv(image_fused)
-            gradient_joint = torch.max(gradient_1, gradient_2)
-            Loss_gradient = F.l1_loss(gradient_fused, gradient_joint)
+            # ========== 场景2：监督融合质量（完整31通道）==========
+            # 将HSI上采样到融合图像的分辨率
+            if img1.size(2) != image_fused.size(2) or img1.size(3) != image_fused.size(3):
+                img1_up = F.interpolate(
+                    img1,
+                    size=(image_fused.size(2), image_fused.size(3)),
+                    mode='bilinear',
+                    align_corners=False
+                )
+            else:
+                img1_up = img1
+
+            # ✅ 对所有31个通道计算梯度
+            gradient_hsi_all = self.sobelconv(img1_up)  # (B, 31, H, W)
+            gradient_fused_all = self.sobelconv(image_fused)  # (B, 31, H, W)
+
+            # 将31通道梯度转换为3通道（用于与MSI比较）
+            C = gradient_hsi_all.size(1)
+            band_per_channel = C // 3
+
+            # HSI的31通道梯度 -> 3通道
+            gradient_hsi_r = gradient_hsi_all[:, :band_per_channel, :, :].mean(dim=1, keepdim=True)
+            gradient_hsi_g = gradient_hsi_all[:, band_per_channel:2 * band_per_channel, :, :].mean(dim=1, keepdim=True)
+            gradient_hsi_b = gradient_hsi_all[:, 2 * band_per_channel:, :, :].mean(dim=1, keepdim=True)
+            gradient_hsi_3ch = torch.cat([gradient_hsi_r, gradient_hsi_g, gradient_hsi_b], dim=1)
+
+            # 融合结果的31通道梯度 -> 3通道
+            gradient_fused_r = gradient_fused_all[:, :band_per_channel, :, :].mean(dim=1, keepdim=True)
+            gradient_fused_g = gradient_fused_all[:, band_per_channel:2 * band_per_channel, :, :].mean(dim=1,
+                                                                                                       keepdim=True)
+            gradient_fused_b = gradient_fused_all[:, 2 * band_per_channel:, :, :].mean(dim=1, keepdim=True)
+            gradient_fused_3ch = torch.cat([gradient_fused_r, gradient_fused_g, gradient_fused_b], dim=1)
+
+            # MSI的梯度（3通道）
+            gradient_msi = self.sobelconv(img2)  # (B, 3, H, W)
+
+            # ✅ 计算两部分损失
+            # 损失1：融合结果的3通道梯度应该保留HSI和MSI的最强梯度
+            gradient_joint_3ch = torch.max(gradient_hsi_3ch, gradient_msi)
+            loss_3ch = F.l1_loss(gradient_fused_3ch, gradient_joint_3ch)
+
+            # 损失2：融合结果的31通道梯度应该与HSI的31通道梯度一致（光谱保真度）
+            loss_31ch = F.l1_loss(gradient_fused_all, gradient_hsi_all)
+
+            # ✅ 综合损失（平衡空间细节和光谱保真度）
+            Loss_gradient = loss_3ch + 0.5 * loss_31ch
+
             return Loss_gradient
 
 
 class Sobelxy(nn.Module):
     """
-    Sobel算子 - 支持多通道
+    ✅ Sobel算子 - 已支持任意通道数（包括31通道）
+    这个类不需要修改
     """
-
     def __init__(self):
         super(Sobelxy, self).__init__()
         kernelx = [[-1, 0, 1],
@@ -76,16 +181,17 @@ class Sobelxy(nn.Module):
 
     def forward(self, x):
         """
-        输入: (B, C, H, W)
+        ✅ 支持任意通道数
+        输入: (B, C, H, W) - C可以是3或31
         输出: (B, C, H, W) - 每个通道的梯度
         """
         B, C, H, W = x.shape
 
-        # 对每个通道分别计算梯度
+        # ✅ 对每个通道分别计算梯度（支持31通道）
         sobelx_list = []
         sobely_list = []
         for i in range(C):
-            channel = x[:, i:i + 1, :, :]
+            channel = x[:, i:i+1, :, :]
             sobelx = F.conv2d(channel, self.weightx, padding=1)
             sobely = F.conv2d(channel, self.weighty, padding=1)
             sobelx_list.append(sobelx)
@@ -95,6 +201,79 @@ class Sobelxy(nn.Module):
         sobely = torch.cat(sobely_list, dim=1)
 
         return torch.abs(sobelx) + torch.abs(sobely)
+
+
+class SpectralConsistencyLoss(nn.Module):
+    """
+    ✅ 光谱一致性损失 - 确保31通道的光谱曲线保真度
+    """
+
+    def __init__(self):
+        super(SpectralConsistencyLoss, self).__init__()
+
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: (B, 31, H, W) - 预测的高光谱图像
+            target: (B, 31, H, W) - 真实的高光谱图像
+        Returns:
+            loss: 光谱一致性损失
+        """
+        # ✅ 方法1：直接计算所有31个通道的L1损失
+        spectral_loss = F.l1_loss(pred, target)
+
+        # ✅ 方法2：计算光谱向量的余弦相似度（更关注光谱形状）
+        # 将空间维度展平
+        pred_flat = pred.view(pred.size(0), pred.size(1), -1)  # (B, 31, H*W)
+        target_flat = target.view(target.size(0), target.size(1), -1)  # (B, 31, H*W)
+
+        # 计算余弦相似度
+        pred_norm = F.normalize(pred_flat, p=2, dim=1)  # L2归一化
+        target_norm = F.normalize(target_flat, p=2, dim=1)
+
+        # 余弦相似度损失
+        cos_sim = (pred_norm * target_norm).sum(dim=1).mean()  # 越大越好
+        cos_loss = 1 - cos_sim  # 转换为损失（越小越好）
+
+        # 综合损失
+        return spectral_loss + 0.1 * cos_loss
+
+
+class SpectralAngleLoss(nn.Module):
+    """
+    ✅ 光谱角距离 (SAM) - 衡量光谱向量之间的角度
+    """
+
+    def __init__(self):
+        super(SpectralAngleLoss, self).__init__()
+
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: (B, 31, H, W) - 预测的高光谱图像
+            target: (B, 31, H, W) - 真实的高光谱图像
+        Returns:
+            loss: 平均SAM损失（弧度）
+        """
+        # 将空间维度展平
+        pred_flat = pred.view(pred.size(0), pred.size(1), -1)  # (B, 31, H*W)
+        target_flat = target.view(target.size(0), target.size(1), -1)  # (B, 31, H*W)
+
+        # 计算内积
+        dot_product = torch.sum(pred_flat * target_flat, dim=1)  # (B, H*W)
+
+        # 计算模长
+        pred_norm = torch.norm(pred_flat, dim=1) + 1e-8  # (B, H*W)
+        target_norm = torch.norm(target_flat, dim=1) + 1e-8  # (B, H*W)
+
+        # 计算cos值
+        cos_theta = dot_product / (pred_norm * target_norm)
+        cos_theta = torch.clamp(cos_theta, -1.0, 1.0)
+
+        # 计算角度（弧度）
+        sam = torch.acos(cos_theta)  # (B, H*W)
+
+        return torch.mean(sam)
 
 
 class CorrelationCoefficient(nn.Module):
