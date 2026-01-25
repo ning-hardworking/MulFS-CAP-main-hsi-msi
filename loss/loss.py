@@ -301,77 +301,91 @@ class CorrelationCoefficient(nn.Module):
         return CC
 
 
-class L_correspondence(nn.Module):
-    def __init__(self, height=256, weight=256):
-        super(L_correspondence, self).__init__()
-        self.height = height
-        self.weight = weight
+class L_correspondence_static(nn.Module):
+    """
+    静态对齐监督损失 - 适用于预先生成的配准数据对
 
-    def forward(self, correspondence_matrixs, index_r):
-        size = correspondence_matrixs.size()
+    核心思想：
+    1. 通过CMAP得到的对齐矩阵 correspondence_matrixs 应该能够：
+       - 将 msi_2 的特征对齐到 hsi_1
+       - 使得融合结果 fusion_sample 接近 gt_1（或gt_2）
+
+    2. 监督方式：
+       - 融合结果应该同时保留 hsi_1 的光谱信息
+       - 融合结果应该同时保留 msi_2 的空间细节
+    """
+
+    def __init__(self):
+        super(L_correspondence_static, self).__init__()
+
+    def forward(self, correspondence_matrixs, fusion_sample, hsi_1, msi_2, gt_1):
+        """
+        计算对齐监督损失
+
+        Args:
+            correspondence_matrixs: (num_windows, B, sw^2, lw^2) - CMAP生成的对齐矩阵
+            fusion_sample: (B, 31, H, W) - 最终融合结果
+            hsi_1: (B, 31, H_hsi, W_hsi) - Pair1的HSI（参考）
+            msi_2: (B, 3, H, W) - Pair2的MSI（移动）
+            gt_1: (B, 31, H, W) - GT（用于监督）
+
+        Returns:
+            loss_alignment: 对齐损失
+            loss_consistency: 一致性损失
+        """
         device = correspondence_matrixs.device
-        small_window_size = int(math.sqrt(size[2]))
-        large_window_size = int(math.sqrt(size[3]))
-        batch_size = size[1]
-        win_num = size[0]
-        index = index_r
 
-        base_index = torch.arange(0, self.height * self.weight, device=device).reshape(self.height, self.weight)
-        unfold_win = nn.Unfold(kernel_size=(small_window_size, small_window_size), stride=small_window_size)
-        base_index = base_index.repeat(1, 1, 1, 1).to(dtype=torch.float32)
-        sw_absolute_base_index = unfold_win(base_index)
-        lw_absolute_base_index = model.df_window_partition(base_index, large_window_size, small_window_size,
-                                                           is_bewindow=False)
-        sw_win_ralative_base_index = torch.arange(0, small_window_size * small_window_size, device=device)
+        # ========== 1. 对齐质量损失 ==========
+        # 思想：融合结果应该接近GT
+        loss_alignment = F.l1_loss(fusion_sample, gt_1)
 
-        loss_correspondence_matrix = torch.zeros(win_num, batch_size, device=device)
-        loss_correspondence_matrix_1 = torch.zeros(win_num, batch_size, device=device)
+        # ========== 2. 对齐矩阵的稀疏性约束 ==========
+        # 思想：每个小窗口的像素应该只对应大窗口中的少数几个像素（稀疏对应）
+        # correspondence_matrixs: (num_windows, B, sw^2, lw^2)
+        # 每行应该是一个尖峰分布（接近one-hot）
 
-        for i in range(batch_size):
-            for j in range(win_num):
-                lw_win_absolute_base_index = lw_absolute_base_index[0, :, j]
-                sw_win_absolute_base_index = sw_absolute_base_index[0, :, j]
-                indices = (lw_win_absolute_base_index.unsqueeze(dim=1) == index[i, 1, :]).nonzero(as_tuple=True)
-                corresponding_lw_absolute_indices = lw_win_absolute_base_index[indices[0]]
-                corresponding_allimgae_absolute_indices = index[i, 0, :][indices[1]]
-                corresponding_lw_relative_indices = indices[0]
-                insw_indices = (sw_win_absolute_base_index.unsqueeze(
-                    dim=1) == corresponding_allimgae_absolute_indices).nonzero(as_tuple=True)
-                insw_corresponding_sw_absolute_index = sw_win_absolute_base_index[insw_indices[0]]
-                insw_corresponding_sw_relative_index = sw_win_ralative_base_index[insw_indices[0]]
-                insw_corresponding_lw_absolute_index = corresponding_lw_absolute_indices[insw_indices[1]]
-                insw_corresponding_lw_relative_index = corresponding_lw_relative_indices[insw_indices[1]]
+        num_windows = correspondence_matrixs.size(0)
+        batch_size = correspondence_matrixs.size(1)
 
-                zero_mask = torch.logical_or(insw_corresponding_sw_absolute_index != 0,
-                                             insw_corresponding_lw_absolute_index != 0).nonzero()
-                nozeropair_insw_corresponding_sw_relative_index = insw_corresponding_sw_relative_index[zero_mask]
-                nozeropair_insw_corresponding_lw_relative_index = insw_corresponding_lw_relative_index[zero_mask]
+        # 计算每行的熵（熵越小，分布越集中）
+        entropy_loss = 0
+        for i in range(num_windows):
+            for j in range(batch_size):
+                matrix = correspondence_matrixs[i, j]  # (sw^2, lw^2)
+                # 避免log(0)
+                matrix_safe = torch.clamp(matrix, min=1e-8, max=1.0)
+                # 计算熵: -sum(p * log(p))
+                entropy = -torch.sum(matrix_safe * torch.log(matrix_safe), dim=1).mean()
+                entropy_loss += entropy
 
-                corresponding_win_index = torch.cat([nozeropair_insw_corresponding_sw_relative_index.permute(1, 0),
-                                                     nozeropair_insw_corresponding_lw_relative_index.permute(1, 0)],
-                                                    dim=0)
-                corresponding_win_matrix = torch.sparse_coo_tensor(corresponding_win_index,
-                                                                   torch.ones(corresponding_win_index.size()[1],
-                                                                              device=device),
-                                                                   (small_window_size * small_window_size,
-                                                                    large_window_size * large_window_size))
-                assert (torch.sum(torch.abs(corresponding_win_matrix.to_dense())) != 0)
+        entropy_loss = entropy_loss / (num_windows * batch_size)
 
-                predict_correspondence_matrix = correspondence_matrixs[j, i, :, :]
-                c_num = nozeropair_insw_corresponding_sw_relative_index.size()[0]
-                predict_correspondence_matrix_1 = torch.clamp(predict_correspondence_matrix, 1e-6, 1 - 1e-6)
-                l_cm = (-1 / c_num) * torch.sum(
-                    torch.mul(torch.log(predict_correspondence_matrix_1), corresponding_win_matrix.to_dense()))
+        # ========== 3. 光谱一致性损失 ==========
+        # 思想：融合结果的光谱曲线应该与hsi_1保持一致
+        # 将hsi_1上采样到融合结果的分辨率
+        hsi_1_up = F.interpolate(
+            hsi_1,
+            size=(fusion_sample.size(2), fusion_sample.size(3)),
+            mode='bilinear',
+            align_corners=False
+        )
 
-                loss_correspondence_matrix[j, i] = l_cm
+        # 计算光谱一致性（所有31个通道）
+        loss_spectral = F.l1_loss(fusion_sample, hsi_1_up)
 
-                l_c = F.l1_loss(predict_correspondence_matrix, corresponding_win_matrix.to_dense())
-                loss_correspondence_matrix_1[j, i] = l_c
+        # ========== 4. 总损失 ==========
+        # 加权组合
+        total_loss = (
+                1.0 * loss_alignment +  # 与GT对齐
+                0.5 * entropy_loss +  # 对齐矩阵稀疏性
+                0.5 * loss_spectral  # 光谱一致性
+        )
 
-        loss_correspondence_matrix = torch.mean(loss_correspondence_matrix)
-        loss_correspondence_matrix_1 = torch.mean(loss_correspondence_matrix_1)
-
-        return loss_correspondence_matrix, loss_correspondence_matrix_1
+        return total_loss, {
+            'alignment': loss_alignment.item(),
+            'entropy': entropy_loss.item(),
+            'spectral': loss_spectral.item()
+        }
 
 
 # ========== 新增：HSI-MSI专用损失函数 ==========

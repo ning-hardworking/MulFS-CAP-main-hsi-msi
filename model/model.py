@@ -110,7 +110,7 @@ class Decoder(nn.Module):
     def forward(self, x):
         out_f = self.D_0(x)
         out = self.D(out_f)
-        return out, out_f
+        return out, out_f   #out是最终预测的高光谱图像，out_f是解码器中间特征
 
 
 class Enhance(nn.Module):
@@ -230,225 +230,6 @@ class PositionalEncoding(nn.Module):
         device = x.device
         x = x + self.pe[:, :x.size(1)].to(device)
         return self.dropout(x)
-
-
-class AffineTransform(nn.Module):
-    """
-    仿射变换 - 支持多通道图像
-    用于数据增强，生成未配准的图像对
-    ✅ 修复：强制使用FP32精度进行矩阵运算，避免混合精度错误
-    """
-
-    def __init__(self, degrees=0, translate=0.1, return_warp=False):
-        super(AffineTransform, self).__init__()
-        self.trs = kornia.augmentation.RandomAffine(degrees, (translate, translate), return_transform=True, p=1)
-        self.return_warp = return_warp
-
-    def forward(self, input):
-        device = input.device
-        batch_size, _, height, weight = input.shape
-
-        # ✅ 关键修复：保存原始dtype，强制转换为float32
-        original_dtype = input.dtype
-        if input.dtype == torch.float16:  # 如果是FP16，转换为FP32
-            input = input.float()
-
-        warped, affine_param = self.trs(input)
-
-        # ✅ 强制使用float32进行矩阵运算
-        T = torch.FloatTensor([[2. / weight, 0, -1],
-                               [0, 2. / height, -1],
-                               [0, 0, 1]]).repeat(batch_size, 1, 1).to(device).float()
-
-        # ✅ 确保affine_param是float32
-        affine_param = affine_param.float()
-
-        # 矩阵求逆运算（必须是FP32）
-        theta = torch.inverse(torch.bmm(torch.bmm(T, affine_param), torch.inverse(T)))
-
-        base = kornia.utils.create_meshgrid(height, weight, device=device).to(input.dtype)
-        grid = F.affine_grid(theta[:, :2, :], size=input.size(), align_corners=False)
-
-        disp = grid - base
-
-        if self.return_warp:
-            warped_grid_sample = F.grid_sample(input, grid, align_corners=False, mode='bilinear')
-
-            # ✅ 转换回原始dtype
-            if original_dtype == torch.float16:
-                warped_grid_sample = warped_grid_sample.half()
-
-            return warped_grid_sample, disp
-        else:
-            return disp
-
-class ElasticTransform(nn.Module):
-    """
-    弹性变换 - 支持多通道图像
-    用于模拟非刚性形变
-    """
-
-    def __init__(self, kernel_size=63, sigma=32, align_corners=False, mode="bilinear", return_warp=False):
-        super(ElasticTransform, self).__init__()
-        self.kernel_size = kernel_size
-        self.sigma = sigma
-        self.align_corners = align_corners
-        self.mode = mode
-        self.return_warp = return_warp
-
-    def forward(self, input):
-        batch_size, _, height, weight = input.shape
-        device = input.device
-        noise = torch.rand(batch_size, 2, height, weight, device=device) * 2 - 1
-
-        if self.return_warp:
-            warped, disp = self.elastic_transform2d(input, noise)
-            return warped, disp
-        else:
-            disp = self.elastic_transform2d(input, noise)
-            return disp
-
-    def elastic_transform2d(self, image: torch.Tensor, noise: torch.Tensor):
-        if not isinstance(image, torch.Tensor):
-            raise TypeError(f"Input image is not torch.Tensor. Got {type(image)}")
-
-        if not isinstance(noise, torch.Tensor):
-            raise TypeError(f"Input noise is not torch.Tensor. Got {type(noise)}")
-
-        if not len(image.shape) == 4:
-            raise ValueError(f"Invalid image shape, we expect BxCxHxW. Got: {image.shape}")
-
-        if not len(noise.shape) == 4 or noise.shape[1] != 2:
-            raise ValueError(f"Invalid noise shape, we expect Bx2xHxW. Got: {noise.shape}")
-
-        device = image.device
-
-        kernel_x: torch.Tensor = get_gaussian_kernel2d((self.kernel_size, self.kernel_size), (self.sigma, self.sigma))[
-            None]
-        kernel_y: torch.Tensor = get_gaussian_kernel2d((self.kernel_size, self.kernel_size), (self.sigma, self.sigma))[
-            None]
-
-        disp_x: torch.Tensor = noise[:, :1].to(device)
-        disp_y: torch.Tensor = noise[:, 1:].to(device)
-
-        disp_x = kornia.filters.filter2d(disp_x, kernel=kernel_y, border_type="constant")
-        disp_y = kornia.filters.filter2d(disp_y, kernel=kernel_x, border_type="constant")
-
-        disp = torch.cat([disp_x, disp_y], dim=1).permute(0, 2, 3, 1)
-
-        if self.return_warp:
-            b, c, h, w = image.shape
-            base = kornia.utils.create_meshgrid(h, w, device=image.device).to(image.dtype)
-            grid = (base + disp).clamp(-1, 1)
-            warped = F.grid_sample(image, grid, align_corners=self.align_corners, mode=self.mode)
-            return warped, disp
-        else:
-            return disp
-
-
-class ImageTransform(nn.Module):
-    """
-    图像变换模块 - 组合仿射和弹性变换
-    支持HSI和MSI的多通道变换，自动处理分辨率差异
-    ✅ 修复：兼容混合精度训练
-    """
-
-    def __init__(self, ET_kernel_size=101, ET_kernel_sigma=16, AT_translate=0.01):
-        super(ImageTransform, self).__init__()
-        self.affine = AffineTransform(translate=AT_translate)
-        self.elastic = ElasticTransform(kernel_size=ET_kernel_size, sigma=ET_kernel_sigma)
-
-    def generate_grid(self, input):
-        device = input.device
-        batch_size, _, height, weight = input.size()
-
-        # ✅ 强制使用FP32进行grid生成
-        original_dtype = input.dtype
-        if input.dtype == torch.float16:
-            input = input.float()
-
-        affine_disp = self.affine(input)
-        elastic_disp = self.elastic(input)
-
-        base = kornia.utils.create_meshgrid(height, weight).to(dtype=torch.float32).repeat(batch_size, 1, 1, 1).to(
-            device)
-        disp = affine_disp + elastic_disp
-        grid = base + disp
-
-        return grid
-
-    def make_transform_matrix(self, grid):
-        device = grid.device
-        batch_size, height, weight, _ = grid.size()
-
-        # ✅ 确保grid是FP32
-        grid = grid.float()
-
-        grid_s = torch.zeros_like(grid)
-        grid_s[:, :, :, 0] = ((grid[:, :, :, 0] / 2) + 0.5) * (weight - 1)
-        grid_s[:, :, :, 1] = ((grid[:, :, :, 1] / 2) + 0.5) * (height - 1)
-        grid_s = torch.round(grid_s).to(dtype=torch.int64)
-
-        base_s = kornia.utils.create_meshgrid(height, weight, normalized_coordinates=False).to(
-            dtype=torch.float32).repeat(
-            batch_size, 1, 1, 1).to(device)
-
-        x_index = base_s.reshape([batch_size, height * weight, 2]).to(dtype=torch.int64)
-        y_index = grid_s.reshape([batch_size, height * weight, 2]).to(dtype=torch.int64)
-        x_index_o = x_index[:, :, 0] + x_index[:, :, 1] * height
-        y_index_o = y_index[:, :, 0] + y_index[:, :, 1] * height
-
-        mask_x_min = (y_index[:, :, 0] > -1).to(torch.int64).unsqueeze(dim=-1).repeat(1, 1, 2)
-        mask_y_min = (y_index[:, :, 1] > -1).to(torch.int64).unsqueeze(dim=-1).repeat(1, 1, 2)
-        mask_x_max = (y_index[:, :, 0] < weight).to(torch.int64).unsqueeze(dim=-1).repeat(1, 1, 2)
-        mask_y_max = (y_index[:, :, 1] < height).to(torch.int64).unsqueeze(dim=-1).repeat(1, 1, 2)
-        mask = torch.mul(torch.mul(mask_x_min, mask_y_min), torch.mul(mask_x_max, mask_y_max))
-        x_index_o = torch.mul(x_index_o, mask[:, :, 0])
-        y_index_o = torch.mul(y_index_o, mask[:, :, 0])
-        filler = mask[:, :, 0].to(dtype=torch.float32)
-
-        index = torch.cat([x_index_o.unsqueeze(dim=1), y_index_o.unsqueeze(dim=1)], dim=1)
-        index_r = torch.cat([y_index_o.unsqueeze(dim=1), x_index_o.unsqueeze(dim=1)], dim=1)
-
-        return index, index_r, filler
-
-    def forward(self, image_1, image_2):
-        """
-        image_1: HSI (B, 31, H_hsi, W_hsi) - 低分辨率高光谱
-        image_2: MSI (B, 3, H_msi, W_msi) - 高分辨率多光谱
-
-        返回变换后的图像和变换矩阵
-        """
-        # ✅ 保存原始dtype
-        original_dtype = image_1.dtype
-
-        # 关键：将HSI上采样到MSI的分辨率以便应用相同的变换
-        if image_1.size(2) != image_2.size(2) or image_1.size(3) != image_2.size(3):
-            image_1_upsampled = F.interpolate(
-                image_1,
-                size=(image_2.size(2), image_2.size(3)),
-                mode='bilinear',
-                align_corners=False
-            )
-        else:
-            image_1_upsampled = image_1
-
-        # 基于MSI生成变换网格
-        grid = self.generate_grid(image_2)
-
-        # 生成变换矩阵
-        index, index_r, filler = self.make_transform_matrix(grid)
-
-        # ✅ 应用变换时确保grid和image dtype匹配
-        image_1_warp = F.grid_sample(image_1_upsampled.float(), grid, align_corners=False, mode='bilinear')
-        image_2_warp = F.grid_sample(image_2.float(), grid, align_corners=False, mode='bilinear')
-
-        # ✅ 转换回原始dtype
-        if original_dtype == torch.float16:
-            image_1_warp = image_1_warp.half()
-            image_2_warp = image_2_warp.half()
-
-        return image_1_warp, image_2_warp, index, index_r, filler
 
 
 def window_partition(x, window_size, stride):
@@ -870,31 +651,17 @@ def CMAP(fixed_windows, moving_windows, hsi_MHCSA, msi_MHCSA, is_hsi_fixed):
 
 
 class DictionaryRepresentationModule(nn.Module):
-    """
-    字典表示模块 - 极致显存优化版
-
-    优化措施：
-    1. element_size: 4 → 2（减少75%显存）
-    2. l_n: 16 → 4（减少93%显存）
-    3. c_n: 16 → 4（减少93%显存）
-
-    字典大小：
-    - 原版：(256, 1, 1024) = (16×16, 1, 4×4×64) ≈ 1GB
-    - 优化版：(16, 1, 256) = (4×4, 1, 2×2×64) ≈ 16MB（减少98%）
-    """
-
     def __init__(self, channels=64):
         super(DictionaryRepresentationModule, self).__init__()
 
         # ========== ✅ 核心优化：减小字典规模 ==========
-        element_size = 2  # ✅ 4 → 2（每个元素的尺寸）
+        element_size = 4
         self.element_size = element_size
         self.channels = channels
-        l_n = 4  # ✅ 16 → 4（字典的行数）
-        c_n = 4  # ✅ 16 → 4（字典的列数）
+        l_n = 16
+        c_n = 16
 
         # ========== 可学习的模态字典 ==========
-        # shape: (16, 1, 256) = (4×4, 1, 2×2×64)
         self.Dictionary = nn.Parameter(
             torch.FloatTensor(l_n * c_n, 1, element_size * element_size * channels).to(torch.device("cuda:0")),
             requires_grad=True
@@ -906,14 +673,14 @@ class DictionaryRepresentationModule(nn.Module):
 
         # ========== 交叉注意力（用于字典查询）==========
         self.CA = nn.MultiheadAttention(
-            embed_dim=element_size * element_size * channels,  # 2×2×64 = 256
+            embed_dim=element_size * element_size * channels,
             num_heads=1,  # 单头注意力（节省显存）
             dropout=0
         )
 
         # ========== 用于可视化字典 ==========
         self.flod_win_1 = nn.Fold(
-            output_size=(l_n * element_size, c_n * element_size),  # (8, 8)
+            output_size=(l_n * element_size, c_n * element_size),
             kernel_size=(element_size, element_size),
             stride=element_size
         )

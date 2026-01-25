@@ -24,9 +24,9 @@ parser.add_argument('--save_image_num', dest='save_image_num', default=10, type=
 parser.add_argument('--save_model_num', dest='save_model_num', default=20, type=int)  # ✅ 减少保存频率
 
 # ========== 🔥 核心显存优化参数 🔥 ==========
-parser.add_argument('--img_size', type=int, default=512)  # ✅ 512 → 128（显存减少93%）
-parser.add_argument('--small_w_size', type=float, default=8)   # ✅ 32 → 8
-parser.add_argument('--large_w_size', type=float, default=12)  # ✅ 52 → 12
+parser.add_argument('--img_size', type=int, default=512)
+parser.add_argument('--small_w_size', type=float, default=8)
+parser.add_argument('--large_w_size', type=float, default=12)
 parser.add_argument('--batch_size', dest='batch_size', default=1, type=int)
 
 # ========== 训练参数 ==========

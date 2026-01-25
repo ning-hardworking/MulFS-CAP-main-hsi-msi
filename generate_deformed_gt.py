@@ -13,9 +13,9 @@ GT_RAW_DIR = os.path.join(ROOT_PATH, "X")  # 原始GT/MSI文件夹
 GT_DEFORMED_SAVE_DIR = os.path.join(ROOT_PATH, "X_deformed")  # 刚性+非刚性形变 保存目录
 GT_RIGID_ONLY_SAVE_DIR = os.path.join(ROOT_PATH, "X_rigid_only")  # ✅ 新增：仅刚性形变 保存目录
 
-# 形变参数：原论文MulFS-CAP原版最优值，无需修改
-RIGID_PARAMS = {"degrees": 5, "translate": 0.03, "scale": (0.95, 1.05)}
-ELASTIC_PARAMS = {"kernel_size": 63, "sigma": 32}
+# 形变参数：
+RIGID_PARAMS = {"degrees": 3, "translate": 0.03, "scale": (0.95, 1.05)}
+ELASTIC_PARAMS = {"kernel_size": 41, "sigma": 3}
 
 # 设备配置：自动GPU/CPU适配
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -26,7 +26,7 @@ print(f"当前运行设备: {device}")
 class AffineTransform(torch.nn.Module):
     """刚性形变：旋转、平移、缩放（原论文）"""
 
-    def __init__(self, degrees=5, translate=0.05, scale=(0.9, 1.1), return_warp=True):
+    def __init__(self, degrees=3, translate=0.03, scale=(0.95, 1.05), return_warp=True):
         super().__init__()
         self.degrees = degrees
         self.translate = translate
@@ -57,40 +57,84 @@ class AffineTransform(torch.nn.Module):
 
 
 class ElasticTransform(torch.nn.Module):
-    """非刚性形变：弹性扭曲（原论文）"""
+    """
+    HSI-MSI 安全版 Elastic Transform
+    - 位移幅度：≈ 8 像素
+    - 位移单位：归一化坐标
+    - padding_mode：zeros
+    - 含能量保护（mean-preserving）
+    """
 
-    def __init__(self, kernel_size=63, sigma=32, return_warp=True):
+    def __init__(self, kernel_size=41, sigma=3, return_warp=True):
         super().__init__()
         self.kernel_size = kernel_size
-        self.sigma = sigma
+        self.sigma = sigma  # 🔥 这里 sigma 现在代表“最大像素位移 ≈ 8”
         self.return_warp = return_warp
 
     def forward(self, x):
-        batch_size, C, H, W = x.shape
-        dx = torch.randn((batch_size, 1, H, W), device=x.device)
-        dy = torch.randn((batch_size, 1, H, W), device=x.device)
+        """
+        x: (B, C, H, W)
+        """
+        B, C, H, W = x.shape
+        device = x.device
 
-        dx = F.pad(dx, [self.kernel_size // 2] * 4, mode='reflect')
-        dy = F.pad(dy, [self.kernel_size // 2] * 4, mode='reflect')
+        # ===================== 1️⃣ 生成随机位移场（像素单位） =====================
+        dx = torch.randn((B, 1, H, W), device=device)
+        dy = torch.randn((B, 1, H, W), device=device)
 
-        kernel = torch.exp(-torch.arange(self.kernel_size) ** 2 / (2 * self.sigma ** 2)).to(x.device)
-        kernel = kernel.view(1, 1, -1, 1) * kernel.view(1, 1, 1, -1)
+        # ===================== 2️⃣ 高斯平滑（生成连续形变） =====================
+        pad = self.kernel_size // 2
+        dx = F.pad(dx, [pad] * 4, mode='reflect')
+        dy = F.pad(dy, [pad] * 4, mode='reflect')
+
+        coords = torch.arange(self.kernel_size, device=device) - pad
+        g = torch.exp(-(coords ** 2) / (2 * (self.kernel_size / 6) ** 2))
+        g = g / g.sum()
+        kernel = g[:, None] * g[None, :]
+        kernel = kernel.view(1, 1, self.kernel_size, self.kernel_size)
+
         dx = F.conv2d(dx, kernel, padding=0)
         dy = F.conv2d(dy, kernel, padding=0)
 
-        dx = dx * self.sigma / dx.max()
-        dy = dy * self.sigma / dy.max()
+        # ===================== 3️⃣ 控制位移幅度：≈ 8 像素 =====================
+        dx = dx / (dx.abs().max() + 1e-6) * self.sigma
+        dy = dy / (dy.abs().max() + 1e-6) * self.sigma
 
-        grid_y, grid_x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-        grid = torch.stack([grid_x, grid_y], dim=-1).float().to(x.device)
-        grid = grid.unsqueeze(0) + torch.cat([dx, dy], dim=1).permute(0, 2, 3, 1)
-        grid = 2.0 * grid / torch.tensor([W - 1, H - 1], device=x.device) - 1.0
+        # ===================== 4️⃣ 像素位移 → 归一化坐标位移 =====================
+        dx_norm = dx / (W - 1)
+        dy_norm = dy / (H - 1)
 
-        warped = F.grid_sample(x, grid, mode='bilinear', padding_mode='border', align_corners=True)
+        # ===================== 5️⃣ 构建 grid（归一化坐标） =====================
+        grid_y, grid_x = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=device),
+            torch.linspace(-1, 1, W, device=device),
+            indexing='ij'
+        )
+
+        base_grid = torch.stack([grid_x, grid_y], dim=-1)  # (H, W, 2)
+        base_grid = base_grid.unsqueeze(0).repeat(B, 1, 1, 1)
+
+        deform_grid = base_grid + torch.cat(
+            [dx_norm, dy_norm], dim=1
+        ).permute(0, 2, 3, 1)
+
+        # ===================== 6️⃣ 采样（zeros padding，防止边界能量污染） =====================
+        warped = F.grid_sample(
+            x,
+            deform_grid,
+            mode='bilinear',
+            padding_mode='zeros',
+            align_corners=True
+        )
+
+        # ===================== 7️⃣ 能量保护（对 HSI 极其重要） =====================
+        mean_before = x.mean(dim=[2, 3], keepdim=True)
+        mean_after = warped.mean(dim=[2, 3], keepdim=True)
+        warped = warped * (mean_before / (mean_after + 1e-6))
+
         if self.return_warp:
-            return warped, grid
+            return warped, deform_grid
         return warped
-
 
 # ====================== 3. 核心函数：✅ 同时生成【仅刚性】+【刚性+非刚性】双版本形变图像 ======================
 def generate_deformed_gt_images():
@@ -166,9 +210,7 @@ def generate_deformed_gt_images():
             print(f"❌ 处理 {file_name} 失败：{str(e)}")
             continue
 
-        # ========== 释放内存：删除所有变量+强制回收，内存占用极低 ==========
-        del img_np, img_tensor, rigid_warped, deformed_img, rigid_img_np, deformed_img_np
-        gc.collect()
+
 
     # ✅ 打印双版本生成结果
     print(f"\n🎉 双版本形变图像全部生成完成！共成功生成 {success_count} 张")

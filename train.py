@@ -1,7 +1,5 @@
 import os
 import time
-from pathlib import Path
-
 import math
 import numpy as np
 import torch
@@ -19,7 +17,7 @@ from utils import utils
 # 全局常量定义
 model_name = "MulFS-CAP-HSI-MSI"
 device_id = "0"
-
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def adjust_learning_rate(optimizer, epoch_count):
     lr = args.args.LR + 0.5 * (args.args.LR_target - args.args.LR) * (
@@ -39,10 +37,11 @@ def warmup_learning_rate(optimizer, epoch_count):
 class TrainDataset(data.Dataset):
     def __init__(self, hsi_dir, msi_dir, gt_dir,
                  hsi_deformed_dir, msi_deformed_dir, gt_deformed_dir,
-                 transform=None, target_size=512):  # ✅ 默认512
+                 transform=None, target_size=512, preload=True):
         super(TrainDataset, self).__init__()
 
         self.target_size = target_size
+        self.transform = transform
 
         # Pair 1: 原始配准数据
         self.hsi_paths = self.find_mat_files(hsi_dir)
@@ -57,12 +56,64 @@ class TrainDataset(data.Dataset):
         assert len(self.hsi_paths) == len(self.hsi_d_paths), \
             f"配对数据数量不一致: Pair1={len(self.hsi_paths)}, Pair2={len(self.hsi_d_paths)}"
 
-        self.transform = transform
+        # ========== ✅ 核心优化：预加载到内存 ==========
+        self.preload = preload
+        self.data_cache = None
+
+        if self.preload:
+            print(f"\n🔄 正在预加载数据集到内存...")
+            self.data_cache = []
+            for idx in range(len(self.hsi_paths)):
+                try:
+                    # 读取Pair 1
+                    hsi_1 = self.read_mat_image(self.hsi_paths[idx])
+                    msi_1 = self.read_mat_image(self.msi_paths[idx])
+                    gt_1 = self.read_mat_image(self.gt_paths[idx])
+
+                    # 读取Pair 2
+                    hsi_2 = self.read_mat_image(self.hsi_d_paths[idx])
+                    msi_2 = self.read_mat_image(self.msi_d_paths[idx])
+                    gt_2 = self.read_mat_image(self.gt_d_paths[idx])
+
+                    # ========== 🔥 关键：预处理resize ==========
+                    original_ratio = 32
+                    hsi_target_size = self.target_size // original_ratio
+
+                    # Resize MSI和GT
+                    if msi_1.size(-1) != self.target_size:
+                        msi_1 = F.interpolate(msi_1.unsqueeze(0), size=(self.target_size, self.target_size),
+                                              mode='bilinear', align_corners=False).squeeze(0)
+                        gt_1 = F.interpolate(gt_1.unsqueeze(0), size=(self.target_size, self.target_size),
+                                             mode='bilinear', align_corners=False).squeeze(0)
+                        msi_2 = F.interpolate(msi_2.unsqueeze(0), size=(self.target_size, self.target_size),
+                                              mode='bilinear', align_corners=False).squeeze(0)
+                        gt_2 = F.interpolate(gt_2.unsqueeze(0), size=(self.target_size, self.target_size),
+                                             mode='bilinear', align_corners=False).squeeze(0)
+
+                    # Resize HSI
+                    if hsi_1.size(-1) != hsi_target_size:
+                        hsi_1 = F.interpolate(hsi_1.unsqueeze(0), size=(hsi_target_size, hsi_target_size),
+                                              mode='bilinear', align_corners=False).squeeze(0)
+                        hsi_2 = F.interpolate(hsi_2.unsqueeze(0), size=(hsi_target_size, hsi_target_size),
+                                              mode='bilinear', align_corners=False).squeeze(0)
+
+                    self.data_cache.append((hsi_1, msi_1, gt_1, hsi_2, msi_2, gt_2))
+
+                    if (idx + 1) % 5 == 0 or (idx + 1) == len(self.hsi_paths):
+                        print(f"   已加载 {idx + 1}/{len(self.hsi_paths)} 对数据")
+
+                except Exception as e:
+                    print(f"❌ 加载第{idx}对数据失败: {str(e)}")
+                    continue
+
+            print(f"✅ 数据集预加载完成！共{len(self.data_cache)}对数据\n")
+
+        # 打印信息
         print(f"✅ 数据集加载成功 (目标尺寸: {target_size}×{target_size}):")
         print(f"   - Pair 1 (原始配准): {len(self.hsi_paths)} 对样本")
         print(f"   - Pair 2 (形变配准): {len(self.hsi_d_paths)} 对样本")
+        print(f"   - 预加载模式: {'✅ 已启用' if self.preload else '❌ 未启用'}")
 
-        # ✅ 新增：显示关键参数
         print(f"\n📐 尺寸参数:")
         print(f"   - MSI/GT目标尺寸: {target_size}×{target_size}")
         print(f"   - HSI目标尺寸: {target_size // 32}×{target_size // 32}")
@@ -129,6 +180,11 @@ class TrainDataset(data.Dataset):
             raise
 
     def __getitem__(self, index):
+        # ========== ✅ 直接从内存读取 ==========
+        if self.preload and self.data_cache is not None:
+            return self.data_cache[index]
+
+        # ========== 原始逻辑（不预加载时使用）==========
         # Pair 1: 原始配准对
         hsi_1 = self.read_mat_image(self.hsi_paths[index])
         msi_1 = self.read_mat_image(self.msi_paths[index])
@@ -140,30 +196,21 @@ class TrainDataset(data.Dataset):
         gt_2 = self.read_mat_image(self.gt_d_paths[index])
 
         # ========== 🔥 Resize到目标尺寸 🔥 ==========
-        # ✅ 修正：保持固定的下采样比例 32
-        original_ratio = 32  # 原始数据: 512/16 = 32
-        hsi_target_size = self.target_size // original_ratio  # 512 // 32 = 16
+        original_ratio = 32
+        hsi_target_size = self.target_size // original_ratio
 
-        # ✅ 验证尺寸合理性
-        if hsi_target_size < 8:
-            raise ValueError(
-                f"❌ HSI目标尺寸({hsi_target_size}×{hsi_target_size})太小！"
-                f"建议 img_size >= 256"
-            )
-
-        # Resize MSI和GT（保持原始512×512，或resize到target_size）
+        # Resize MSI和GT
         if msi_1.size(-1) != self.target_size:
             msi_1 = F.interpolate(msi_1.unsqueeze(0), size=(self.target_size, self.target_size),
                                   mode='bilinear', align_corners=False).squeeze(0)
             gt_1 = F.interpolate(gt_1.unsqueeze(0), size=(self.target_size, self.target_size),
                                  mode='bilinear', align_corners=False).squeeze(0)
-
             msi_2 = F.interpolate(msi_2.unsqueeze(0), size=(self.target_size, self.target_size),
                                   mode='bilinear', align_corners=False).squeeze(0)
             gt_2 = F.interpolate(gt_2.unsqueeze(0), size=(self.target_size, self.target_size),
                                  mode='bilinear', align_corners=False).squeeze(0)
 
-        # Resize HSI（保持原始16×16，或resize到hsi_target_size）
+        # Resize HSI
         if hsi_1.size(-1) != hsi_target_size:
             hsi_1 = F.interpolate(hsi_1.unsqueeze(0), size=(hsi_target_size, hsi_target_size),
                                   mode='bilinear', align_corners=False).squeeze(0)
@@ -230,7 +277,7 @@ if __name__ == '__main__':
     print("🔧 正在初始化损失函数...")
     Lgrad = Loss.L_Grad().to(device)
     CC = Loss.CorrelationCoefficient().to(device)
-    Lcorrespondence = Loss.L_correspondence()
+    Lcorrespondence_static = Loss.L_correspondence_static().to(device)  # 完整版
 
     # ✅ 新增：31通道专用损失函数
     SpectralLoss = Loss.SpectralConsistencyLoss().to(device)
@@ -250,7 +297,6 @@ if __name__ == '__main__':
         MN_msi = model.Enhance()
         HSIDP = model.DictionaryRepresentationModule()
         MSIDP = model.DictionaryRepresentationModule()
-        ImageDeformation = model.ImageTransform()
         MHCSA_hsi = model.MHCSAB()
         MHCSA_msi = model.MHCSAB()
         fusion_module = model.FusionMoudle()
@@ -316,111 +362,27 @@ if __name__ == '__main__':
                 item.to(device, non_blocking=True) for item in x
             ]
 
-            # ✅ 第一个batch进行完整验证
-            if step == 0 and epoch == 0:
-                print(f"\n📊 1. 数据维度验证:")
-                print(f"   Pair 1:")
-                print(f"     - HSI:  {hsi_1.shape}  (期望: [1, 31, 16, 16])")
-                print(f"     - MSI:  {msi_1.shape}  (期望: [1, 3, 512, 512])")
-                print(f"     - GT:   {gt_1.shape}   (期望: [1, 31, 512, 512])")
-                print(f"   Pair 2:")
-                print(f"     - HSI:  {hsi_2.shape}  (期望: [1, 31, 16, 16])")
-                print(f"     - MSI:  {msi_2.shape}  (期望: [1, 3, 512, 512])")
-                print(f"     - GT:   {gt_2.shape}   (期望: [1, 31, 512, 512])")
-
-                # ✅ 验证维度匹配
-                assert hsi_1.size(1) == 31, f"❌ HSI通道数错误！期望31，实际{hsi_1.size(1)}"
-                assert msi_1.size(1) == 3, f"❌ MSI通道数错误！期望3，实际{msi_1.size(1)}"
-                assert gt_1.size(1) == 31, f"❌ GT通道数错误！期望31，实际{gt_1.size(1)}"
-
-                assert hsi_1.size(2) == 16 and hsi_1.size(3) == 16, \
-                    f"❌ HSI尺寸错误！期望16×16，实际{hsi_1.size(2)}×{hsi_1.size(3)}"
-                assert msi_1.size(2) == 512 and msi_1.size(3) == 512, \
-                    f"❌ MSI尺寸错误！期望512×512，实际{msi_1.size(2)}×{msi_1.size(3)}"
-                assert gt_1.size(2) == 512 and gt_1.size(3) == 512, \
-                    f"❌ GT尺寸错误！期望512×512，实际{gt_1.size(2)}×{gt_1.size(3)}"
-
-                print(f"   ✅ 所有维度验证通过！")
-
-                # ✅ 验证数值范围
-                print(f"\n📊 2. 数值范围验证:")
-                print(f"   - HSI:  min={hsi_1.min():.4f}, max={hsi_1.max():.4f}")
-                print(f"   - MSI:  min={msi_1.min():.4f}, max={msi_1.max():.4f}")
-                print(f"   - GT:   min={gt_1.min():.4f}, max={gt_1.max():.4f}")
-
-                assert 0 <= hsi_1.min() and hsi_1.max() <= 1, "❌ HSI数值范围应在[0,1]"
-                assert 0 <= msi_1.min() and msi_1.max() <= 1, "❌ MSI数值范围应在[0,1]"
-                assert 0 <= gt_1.min() and gt_1.max() <= 1, "❌ GT数值范围应在[0,1]"
-                print(f"   ✅ 所有数值范围正常！")
-
-                # ✅ 验证窗口参数
-                print(f"\n📊 3. 窗口参数验证:")
-                hsi_h, hsi_w = hsi_1.size(2), hsi_1.size(3)
-                small_w = int(args.args.small_w_size)
-                large_w = int(args.args.large_w_size)
-
-                print(f"   - HSI尺寸: {hsi_h}×{hsi_w}")
-                print(f"   - small_w_size: {small_w}")
-                print(f"   - large_w_size: {large_w}")
-                print(f"   - 窗口数量: {hsi_h // small_w}×{hsi_w // small_w} = {(hsi_h // small_w) ** 2}个")
-
-                assert small_w <= hsi_h, \
-                    f"❌ small_w_size({small_w}) > HSI高度({hsi_h})！"
-                assert large_w > small_w, \
-                    f"❌ large_w_size({large_w}) 应该 > small_w_size({small_w})！"
-                assert hsi_h % small_w == 0, \
-                    f"❌ HSI尺寸({hsi_h})应该被small_w_size({small_w})整除！"
-
-                print(f"   ✅ 窗口参数验证通过！")
-
-                print(f"\n{'=' * 70}\n")
-        """
-        训练函数
-        处理两对配准数据：
-        - Pair 1: (hsi_1, msi_1, gt_1) - 原始配准对（来自Z_reconst, Y_reconst, X）
-        - Pair 2: (hsi_2, msi_2, gt_2) - 形变配准对（来自Z_deformed, Y_deformed, X_deformed）
-
-        核心思路：
-        1. 分别提取两对配准数据的特征
-        2. 用Pair1的HSI特征 + Pair2的MSI特征 构造未配准对
-        3. 通过跨模态对齐感知学习对齐关系
-        4. 生成最终的融合结果
-        """
-        # ✅ 显存监控
-        if epoch == 0:
-            print(f"\n💾 训练前显存状态:")
-            print(f"   已分配: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
-            print(f"   已缓存: {torch.cuda.memory_reserved() / 1024 ** 3:.2f} GB\n")
-
-        epoch_loss_HSIDP = []
-        epoch_loss_MSIDP = []
-        epoch_loss_same = []
-        epoch_loss_fusion_total = []
-
-        for step, x in enumerate(data_iter):
-            # ========== 数据加载（6个张量）==========
-            hsi_1, msi_1, gt_1, hsi_2, msi_2, gt_2 = [
-                item.to(device, non_blocking=True) for item in x
-            ]
-
             # ✅ 打印维度（仅第一个batch）
             if step == 0 and epoch == 0:
+                # ✅ 动态计算期望尺寸
+                expected_msi_size = args.args.img_size
+                expected_hsi_size = args.args.img_size // 32
+
                 print(f"\n✅ 数据维度验证:")
                 print(f"   Pair 1:")
-                print(f"     - HSI:  {hsi_1.shape}  (期望: [B, 31, 4, 4])")
-                print(f"     - MSI:  {msi_1.shape}  (期望: [B, 3, 128, 128])")
-                print(f"     - GT:   {gt_1.shape}   (期望: [B, 31, 128, 128])")
+                print(f"     - HSI:  {hsi_1.shape}  (期望: [B, 31, {expected_hsi_size}, {expected_hsi_size}])")
+                print(f"     - MSI:  {msi_1.shape}  (期望: [B, 3, {expected_msi_size}, {expected_msi_size}])")
+                print(f"     - GT:   {gt_1.shape}   (期望: [B, 31, {expected_msi_size}, {expected_msi_size}])")
                 print(f"   Pair 2:")
-                print(f"     - HSI:  {hsi_2.shape}  (期望: [B, 31, 4, 4])")
-                print(f"     - MSI:  {msi_2.shape}  (期望: [B, 3, 128, 128])")
-                print(f"     - GT:   {gt_2.shape}   (期望: [B, 31, 128, 128])")
+                print(f"     - HSI:  {hsi_2.shape}  (期望: [B, 31, {expected_hsi_size}, {expected_hsi_size}])")
+                print(f"     - MSI:  {msi_2.shape}  (期望: [B, 3, {expected_msi_size}, {expected_msi_size}])")
+                print(f"     - GT:   {gt_2.shape}   (期望: [B, 31, {expected_msi_size}, {expected_msi_size}])")
 
                 # ✅ 验证GT确实是31通道
-                assert gt_1.size(1) == 31, f"❌ GT通道数错误！期望31，实际{gt_1.size(1)}"
-                assert gt_2.size(1) == 31, f"❌ GT通道数错误！期望31，实际{gt_2.size(1)}"
+                assert gt_1.size(1) == 31, f"❌ GT通道数错误！期望31,实际{gt_1.size(1)}"
+                assert gt_2.size(1) == 31, f"❌ GT通道数错误！期望31,实际{gt_2.size(1)}"
                 print(f"✅ 所有维度匹配！\n")
-
-            # ========== 上采样HSI到MSI的分辨率 ==========
+            # ========== 上采样HSI到GT的分辨率 ==========
             hsi_1_up = F.interpolate(
                 hsi_1,
                 size=(msi_1.size(2), msi_1.size(3)),
@@ -439,71 +401,62 @@ if __name__ == '__main__':
                 # ====================================================================
                 # 阶段1: 基础特征提取（64通道统一特征空间）
                 # ====================================================================
-                hsi_1_base = base_hsi(hsi_1_up)  # (B, 31, 128, 128) -> (B, 64, 128, 128)
-                msi_1_base = base_msi(msi_1)  # (B, 3, 128, 128)  -> (B, 64, 128, 128)
-                hsi_2_base = base_hsi(hsi_2_up)  # (B, 31, 128, 128) -> (B, 64, 128, 128)
-                msi_2_base = base_msi(msi_2)  # (B, 3, 128, 128)  -> (B, 64, 128, 128)
+                hsi_1_base = base_hsi(hsi_1_up)  # hsi_1_up(1, 31, 512, 512) -> hsi_1_base(1, 64, 512, 512)
+                msi_1_base = base_msi(msi_1)  # msi_1(1, 3, 512, 512)  -> msi_1_base(1, 64, 512, 512)
+                hsi_2_base = base_hsi(hsi_2_up)  # hsi_2_up(1, 31, 512, 512) ->hsi_2_base (1, 64,512, 512)
+                msi_2_base = base_msi(msi_2)  # msi_2(1, 3, 512, 512)  -> msi_2_base(1, 64, 512, 512)
 
-                # 释放不需要的上采样结果
-                del hsi_1_up, hsi_2_up
-                torch.cuda.empty_cache()
+
 
                 # ====================================================================
                 # 阶段2: 深层特征提取（用于融合重建）
                 # ====================================================================
                 # Pair 1 的深层特征
-                hsi_1_fe = hsi_MFE(hsi_1_base)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                msi_1_fe = msi_MFE(msi_1_base)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                simple_fusion_f_1 = hsi_1_fe + msi_1_fe
-                fusion_image_1, fusion_f_1 = fusion_decoder(simple_fusion_f_1)  # -> (B, 31, 128, 128)
+                hsi_1_fe = hsi_MFE(hsi_1_base)  # (B, 64, 512, 512) -> hsi_1_fe(B, 64, 512, 512)  B=1
+                msi_1_fe = msi_MFE(msi_1_base)  # (B, 64, 128, 128) -> msi_1_fe (B, 64, 512, 512)  B=1
+                simple_fusion_f_1 = hsi_1_fe + msi_1_fe      # 简单相加融合
+                fusion_image_1, fusion_f_1 = fusion_decoder(simple_fusion_f_1)  # 最终预测的高光谱图像fusion_image_1-> (B, 31, 512, 512)  解码器中间特征fusion_f_1-> (B, 64, 512, 512)  B=1
 
                 # Pair 2 的深层特征
-                hsi_2_fe = hsi_MFE(hsi_2_base)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                msi_2_fe = msi_MFE(msi_2_base)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
+                hsi_2_fe = hsi_MFE(hsi_2_base)  # (B, 64, 512, 512) -> hsi_1_fe(B, 64, 512, 512)  B=1
+                msi_2_fe = msi_MFE(msi_2_base)  # (B, 64, 128, 128) -> msi_1_fe (B, 64, 512, 512)  B=1
                 simple_fusion_f_2 = hsi_2_fe + msi_2_fe
-                fusion_image_2, fusion_f_2 = fusion_decoder(simple_fusion_f_2)  # -> (B, 31, 128, 128)
+                fusion_image_2, fusion_f_2 = fusion_decoder(simple_fusion_f_2)  # 最终预测的高光谱图像fusion_image_2-> (B, 31, 512, 512)  解码器中间特征fusion_f_2-> (B, 64, 512, 512)  B=1
 
-                del simple_fusion_f_1, simple_fusion_f_2
-                torch.cuda.empty_cache()
 
                 # ====================================================================
                 # 阶段3: PAFE特征提取（用于对齐感知）
                 # ====================================================================
                 # Pair 1 的PAFE特征
-                hsi_1_f = PAFE(hsi_1_base)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                msi_1_f = PAFE(msi_1_base)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
+                hsi_1_f = PAFE(hsi_1_base)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
+                msi_1_f = PAFE(msi_1_base)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
                 simple_fusion_pf_1 = hsi_1_f + msi_1_f
-                fusion_pimage_1, fusion_pf_1 = decoder(simple_fusion_pf_1)  # -> (B, 31, 128, 128)
+                fusion_pimage_1, fusion_pf_1 = decoder(simple_fusion_pf_1)  # -> (B, 31, 512, 512)
 
                 # Pair 2 的PAFE特征
-                hsi_2_f = PAFE(hsi_2_base)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                msi_2_f = PAFE(msi_2_base)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
+                hsi_2_f = PAFE(hsi_2_base)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
+                msi_2_f = PAFE(msi_2_base)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
                 simple_fusion_pf_2 = hsi_2_f + msi_2_f
-                fusion_pimage_2, fusion_pf_2 = decoder(simple_fusion_pf_2)  # -> (B, 31, 128, 128)
+                fusion_pimage_2, fusion_pf_2 = decoder(simple_fusion_pf_2)  # -> (B, 31, 512, 512)
 
-                del simple_fusion_pf_1, simple_fusion_pf_2
-                del hsi_1_base, hsi_2_base, msi_1_base, msi_2_base
-                torch.cuda.empty_cache()
 
                 # ====================================================================
                 # 阶段4: 模态归一化（Modality Normalization）
                 # ====================================================================
-                hsi_1_e_f = MN_hsi(hsi_1_f)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                msi_1_e_f = MN_msi(msi_1_f)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                hsi_2_e_f = MN_hsi(hsi_2_f)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                msi_2_e_f = MN_msi(msi_2_f)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
+                hsi_1_e_f = MN_hsi(hsi_1_f)  # (B, 64, 512, 128) -> (B, 64, 512, 512)
+                msi_1_e_f = MN_msi(msi_1_f)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
+                hsi_2_e_f = MN_hsi(hsi_2_f)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
+                msi_2_e_f = MN_msi(msi_2_f)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
 
                 # ====================================================================
                 # 阶段5: 字典表示模块（Dictionary Representation Module）
                 # 用可学习的模态字典补偿单模态特征缺失的信息
                 # ====================================================================
-                HSIDP_hsi_1_f, _ = HSIDP(hsi_1_e_f)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                MSIDP_msi_1_f, _ = MSIDP(msi_1_e_f)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                HSIDP_hsi_2_f, _ = HSIDP(hsi_2_e_f)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
-                MSIDP_msi_2_f, _ = MSIDP(msi_2_e_f)  # (B, 64, 128, 128) -> (B, 64, 128, 128)
+                HSIDP_hsi_1_f, _ = HSIDP(hsi_1_e_f)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
+                MSIDP_msi_1_f, _ = MSIDP(msi_1_e_f)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
+                HSIDP_hsi_2_f, _ = HSIDP(hsi_2_e_f)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
+                MSIDP_msi_2_f, _ = MSIDP(msi_2_e_f)  # (B, 64, 512, 512) -> (B, 64, 512, 512)
 
-                del hsi_1_e_f, msi_1_e_f, hsi_2_e_f, msi_2_e_f
-                torch.cuda.empty_cache()
 
                 # ====================================================================
                 # 阶段6: 跨模态对齐感知（Cross-Modality Alignment Perception）
@@ -536,9 +489,6 @@ if __name__ == '__main__':
                     True  # HSI作为参考
                 )  # -> (num_windows, B, 8*8, 12*12)
 
-                del fixed_DP_sw, moving_DP_lw
-                torch.cuda.empty_cache()
-
                 # ====================================================================
                 # 阶段7: 特征重组和最终融合
                 # 根据对齐矩阵重组MSI特征，使其与HSI对齐
@@ -560,12 +510,13 @@ if __name__ == '__main__':
 
                 # 8.1 基础融合损失（监督两对配准数据的融合质量）
                 # ✅ 修正：传入正确的 (hsi, msi, fusion) 三元组
+                # 8.1 基础融合损失（监督两对配准数据的融合质量）
                 loss_fusion_1 = (
-                        Lgrad(hsi_1, msi_1, fusion_image_1) +  # 31通道梯度损失
-                        Loss.Loss_intensity(hsi_1, msi_1, fusion_image_1) +  # 31通道强度损失
+                        Lgrad(hsi_1, msi_1, fusion_image_1) +
+                        Loss.Loss_intensity(hsi_1, msi_1, fusion_image_1) +
                         Lgrad(hsi_1, msi_1, fusion_pimage_1) +
                         Loss.Loss_intensity(hsi_1, msi_1, fusion_pimage_1) +
-                        0.5 * SpectralLoss(fusion_image_1, gt_1)  # ✅ 新增：光谱一致性损失
+                        0.5 * SpectralLoss(fusion_image_1, gt_1)
                 )
 
                 loss_fusion_2 = (
@@ -573,12 +524,12 @@ if __name__ == '__main__':
                         Loss.Loss_intensity(hsi_2, msi_2, fusion_image_2) +
                         Lgrad(hsi_2, msi_2, fusion_pimage_2) +
                         Loss.Loss_intensity(hsi_2, msi_2, fusion_pimage_2) +
-                        0.5 * SpectralLoss(fusion_image_2, gt_2)  # ✅ 新增
+                        0.5 * SpectralLoss(fusion_image_2, gt_2)
                 )
 
                 loss_0 = loss_fusion_1 + loss_fusion_2
 
-                # 8.2 字典一致性损失（确保字典补偿后的特征与融合特征一致）
+                # 8.2 字典一致性损失
                 loss_HSIDP = (
                         - CC(HSIDP_hsi_1_f, fusion_pf_1.detach())
                         - CC(HSIDP_hsi_2_f, fusion_pf_2.detach())
@@ -589,7 +540,7 @@ if __name__ == '__main__':
                         - CC(MSIDP_msi_2_f, fusion_pf_2.detach())
                 )
 
-                # 8.3 模态一致性损失（确保HSI和MSI的字典补偿结果一致）
+                # 8.3 模态一致性损失
                 loss_same = (
                         F.mse_loss(HSIDP_hsi_1_f, MSIDP_msi_1_f) +
                         F.mse_loss(HSIDP_hsi_2_f, MSIDP_msi_2_f)
@@ -598,20 +549,24 @@ if __name__ == '__main__':
                 loss_1 = 2 * (loss_HSIDP + loss_MSIDP + 0.5 * loss_same)
 
                 # 8.4 对齐融合损失
-                # ✅ 修正：用 hsi_1 和 msi_2 监督（因为是 hsi_1 + aligned(msi_2) 的融合）
                 loss_2 = (
                         Lgrad(hsi_1, msi_2, fusion_image_sample) +
                         Loss.Loss_intensity(hsi_1, msi_2, fusion_image_sample)
                 )
-                # 8.5 对齐监督损失（暂时禁用，需要保存index_r才能启用）
-                # 如果你在generate_deformed_gt.py中保存了变换矩阵，可以启用这部分
-                # loss_correspondence_matrix, loss_correspondence_matrix_1 = Lcorrespondence(
-                #     correspondence_matrixs, index_r
-                # )
-                # loss_3 = 4 * (loss_correspondence_matrix + loss_correspondence_matrix_1)
+
+                # 8.5 对齐监督损失（✅ 新增：静态版本）
+                loss_correspondence, corr_loss_dict = Lcorrespondence_static(
+                    correspondence_matrixs,  # (num_windows, B, sw^2, lw^2)
+                    fusion_image_sample,  # (B, 31, H, W)
+                    hsi_1,  # (B, 31, H_hsi, W_hsi)
+                    msi_2,  # (B, 3, H, W)
+                    gt_1  # (B, 31, H, W)
+                )
+
+                loss_3 = 2.0 * loss_correspondence
 
                 # 总损失
-                loss = loss_0 + loss_1 + loss_2  # + loss_3 (需要index_r时启用)
+                loss = loss_0 + loss_1 + loss_2 + loss_3
 
             # ========== 反向传播（混合精度）==========
             optimizer_HSIDP.zero_grad()
@@ -664,8 +619,8 @@ if __name__ == '__main__':
 
 
             # ✅ 每10步打印显存（可选）
-            if step % 10 == 0:
-                print(f"Step {step}/{iter_num} - 显存: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
+            if step % max(iter_num // 3, 1) == 0 or step == 0:  # 每个epoch只打印3次
+                print(f"Step {step}/{iter_num} - 显存: ...")
 
         # ========== 打印epoch统计信息 ==========
         epoch_loss_HSIDP_mean = np.mean(epoch_loss_HSIDP)
@@ -694,17 +649,21 @@ if __name__ == '__main__':
             cos_theta = torch.clamp(cos_theta, -1.0, 1.0)
             sam = torch.acos(cos_theta).mean() * 180 / np.pi  # 转换为度数
 
+        # ✅ 新增：打印对齐损失详情
         print()
         print(f"📊 Epoch {epoch} 统计:")
         print(f"   - 总损失(Total Loss):     {epoch_loss_fusion_mean:.6f}")
         print(f"   - HSI字典损失(HSIDP):      {epoch_loss_HSIDP_mean:.6f}")
         print(f"   - MSI字典损失(MSIDP):      {epoch_loss_MSIDP_mean:.6f}")
         print(f"   - 模态一致性损失(Same):    {epoch_loss_same_mean:.6f}")
-        with torch.no_grad():
-            spectral_loss_val = SpectralLoss(fusion_image_sample, gt_1)
-            sam_loss_val = SAMLoss(fusion_image_sample, gt_1)
-            print(f"   - 光谱一致性损失:          {spectral_loss_val.item():.6f}")
-            print(f"   - 光谱角损失(SAM):         {sam_loss_val.item():.6f}")
+
+        # ✅ 打印对齐损失的详细信息
+        if 'corr_loss_dict' in locals():
+            print(f"   📍 对齐损失详情:")
+            print(f"      - 融合质量: {corr_loss_dict['fusion']:.6f}")
+            print(f"      - 稀疏性:   {corr_loss_dict['entropy']:.6f}")
+            print(f"      - 光谱:     {corr_loss_dict['spectral']:.6f}")
+            print(f"      - 总计:     {corr_loss_dict['total']:.6f}")
 
         print(f"   📈 评估指标:")
         print(f"      - PSNR: {psnr.item():.4f} dB")
